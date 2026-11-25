@@ -1,7 +1,9 @@
-"""Tests for Spider Grills Venom setup, unload, and service calls."""
+"""Tests for Spider Grills Venom setup, unload, manifest, and service calls."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,6 +22,15 @@ from homeassistant.exceptions import HomeAssistantError
 from .conftest import MOCK_ENTRY_DATA, MOCK_THING_NAME, SAMPLE_SHADOW
 
 
+def test_manifest_metadata() -> None:
+    """Verify manifest.json has integration_type=device and paho-mqtt requirement."""
+    manifest = json.loads(
+        Path("custom_components/spider_venom/manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["integration_type"] == "device"
+    assert "paho-mqtt>=2.1.0" in manifest["requirements"]
+
+
 async def test_setup_unload_and_service_lifecycle(hass: HomeAssistant) -> None:
     """Verify service is registered on setup and removed when last entry unloads."""
     entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
@@ -32,12 +43,33 @@ async def test_setup_unload_and_service_lifecycle(hass: HomeAssistant) -> None:
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
+    assert hasattr(entry, "runtime_data")
     assert hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
     assert not hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
+
+    entry2 = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id="venom-empty-check")
+    entry2.add_to_hass(hass)
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=SAMPLE_SHADOW,
+    ):
+        assert await hass.config_entries.async_setup(entry2.entry_id)
+        await hass.async_block_till_done()
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=[]),
+        pytest.raises(HomeAssistantError, match="No Spider Grills Venom devices"),
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_TARGET_TEMPERATURE,
+            {ATTR_TEMPERATURE: 250},
+            blocking=True,
+        )
 
 
 async def test_set_target_temperature_service_single_and_multi(hass: HomeAssistant) -> None:

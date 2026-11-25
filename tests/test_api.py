@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+import hashlib
+import hmac
 import json
+import logging
+import ssl
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, quote, urlparse
+import uuid
 
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ClientTimeout
+import paho.mqtt.client as mqtt
 import pytest
 
 from custom_components.spider_venom.api import (
+    DEFAULT_TIMEOUT,
     SpiderGrillsAccountClient,
     SpiderVenomApiError,
+    SpiderVenomAuthError,
     SpiderVenomClient,
     _Credentials,
     _redacted_body,
@@ -36,6 +46,25 @@ class MockResponse:
         return None
 
 
+class FakeReasonCode:
+    """Minimal paho ReasonCode stub."""
+
+    def __init__(self, is_failure: bool = False, text: str = "Success") -> None:
+        self.is_failure = is_failure
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+
+class FakeMQTTMessage:
+    """Minimal paho MQTTMessage stub."""
+
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+
 def _make_client(session: MagicMock | None = None, thing_name: str = "venom-123") -> SpiderVenomClient:
     return SpiderVenomClient(
         session=session or MagicMock(),
@@ -46,136 +75,379 @@ def _make_client(session: MagicMock | None = None, thing_name: str = "venom-123"
     )
 
 
-def test_signed_headers_and_signing_key() -> None:
-    """Verify SigV4 headers and key derivation are deterministic."""
-    client = _make_client()
-    creds = _Credentials(
-        access_key_id="AKIAEXAMPLE",
-        secret_key="secret-key-value",
-        session_token="session-token-value",
+def _valid_creds() -> _Credentials:
+    return _Credentials(
+        access_key_id="AKIA1",
+        secret_key="SEC1",
+        session_token="TOK1/+=special",
         expiration=datetime.now(UTC) + timedelta(hours=1),
         identity_id="us-east-2:id-1",
     )
 
-    headers = client._signed_headers(
-        method="GET",
-        path="/things/venom-123/shadow",
-        query_string="",
-        payload="",
-        credentials=creds,
-        service="iotdata",
+
+def test_presigned_ws_path_sigv4_and_security_token_post_signing() -> None:
+    """Verify SigV4 presigned WebSocket URL signs without security token and appends it after."""
+    client = _make_client()
+    creds = _valid_creds()
+    ws_path = client._presigned_ws_path(creds)
+
+    parsed = urlparse(ws_path)
+    assert parsed.path == "/mqtt"
+    params = parse_qs(parsed.query)
+    assert params["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert params["X-Amz-SignedHeaders"] == ["host"]
+    assert params["X-Amz-Security-Token"] == [creds.session_token]
+
+    amz_date = params["X-Amz-Date"][0]
+    date_stamp = amz_date[:8]
+    scope = f"{date_stamp}/us-east-2/iotdevicegateway/aws4_request"
+    assert params["X-Amz-Credential"] == [f"AKIA1/{scope}"]
+
+    signed_query = "&".join(
+        f"{k}={quote(v[0], safe='')}"
+        for k, v in sorted(params.items())
+        if k not in ("X-Amz-Signature", "X-Amz-Security-Token")
     )
+    canonical_request = "\n".join(
+        [
+            "GET",
+            "/mqtt",
+            signed_query,
+            "host:example-ats.iot.us-east-2.amazonaws.com\n",
+            "host",
+            hashlib.sha256(b"").hexdigest(),
+        ]
+    )
+    sts = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    expected_sig = hmac.new(
+        client._signing_key(creds.secret_key, date_stamp, "iotdevicegateway"),
+        sts.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert params["X-Amz-Signature"] == [expected_sig]
+    assert ws_path.endswith(f"&X-Amz-Security-Token={quote(creds.session_token, safe='')}")
 
-    assert headers["x-amz-security-token"] == "session-token-value"
-    assert "x-amz-date" in headers
-    assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/")
-    assert "SignedHeaders=host;x-amz-date;x-amz-security-token" in headers["Authorization"]
-    assert "Signature=" in headers["Authorization"]
 
-    key1 = client._signing_key("secret-key-value", "20260725", "iotdata")
-    key2 = client._signing_key("secret-key-value", "20260725", "iotdata")
-    assert key1 == key2
-    assert len(key1) == 32
+async def test_mqtt_shadow_get_and_update_filters_client_token_and_caches_ssl() -> None:
+    """Verify dashed UUID client_id, cached SSLContext, clientToken filtering, and cleanup."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    created_clients: list[Any] = []
+    published_messages: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, api_version: Any, *, client_id: str, transport: str) -> None:
+            assert api_version is mqtt.CallbackAPIVersion.VERSION2
+            assert transport == "websockets"
+            assert str(uuid.UUID(client_id)) == client_id
+            self.connect_timeout: float = 0.0
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            self.disconnected = False
+            self.loop_stopped = False
+            created_clients.append(self)
+
+        def ws_set_options(self, *, path: str) -> None:
+            assert path.startswith("/mqtt?")
+
+        def tls_set_context(self, ctx: ssl.SSLContext) -> None:
+            pass
+
+        def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+            assert host == "example-ats.iot.us-east-2.amazonaws.com"
+            assert port == 443
+            assert self.connect_timeout == 10.0
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            assert topics[0][0].endswith("/accepted")
+            assert topics[1][0].endswith("/rejected")
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+            published_messages.append((topic, payload))
+            req = json.loads(payload)
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/accepted",
+                    json.dumps({"clientToken": "other-app-token", "state": {"reported": {"mainTemp": 999}}}).encode(),
+                ),
+            )
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/accepted",
+                    json.dumps({"clientToken": req["clientToken"], "state": {"reported": {"mainTemp": 225}}}).encode(),
+                ),
+            )
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+        def loop_stop(self) -> None:
+            self.loop_stopped = True
+
+    fake_ssl_ctx = MagicMock(spec=ssl.SSLContext)
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", FakeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=fake_ssl_ctx) as mock_ssl,
+    ):
+        shadow = await client.async_get_shadow()
+        assert shadow["state"]["reported"]["mainTemp"] == 225
+
+        await client.async_set_target_temperature(300)
+
+    mock_ssl.assert_called_once()
+    assert len(created_clients) == 2
+    assert all(c.disconnected and c.loop_stopped for c in created_clients)
+    assert published_messages[0][0] == "$aws/things/venom-123/shadow/get"
+    assert published_messages[1][0] == "$aws/things/venom-123/shadow/update"
+    update_payload = json.loads(published_messages[1][1])
+    assert update_payload["state"] == {"desired": {"heat": {"t2": {"trgt": 300}}}}
 
 
-async def test_get_shadow_fetches_and_caches_cognito_credentials() -> None:
-    """Verify Cognito credentials are fetched once and cached for subsequent requests."""
+async def test_mqtt_rejected_logs_actual_code_and_raises(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify /rejected shadow messages log the rejection code and raise SpiderVenomApiError."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+
+    class RejectedClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: Any) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+            token = json.loads(payload)["clientToken"]
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/rejected",
+                    json.dumps({"clientToken": token, "code": 400, "message": "Invalid payload"}).encode(),
+                ),
+            )
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.spider_venom.api"),
+        patch("custom_components.spider_venom.api.mqtt.Client", RejectedClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="Shadow get rejected: 400 Invalid payload") as exc_info,
+    ):
+        await client.async_get_shadow()
+
+    assert exc_info.value.status == 400
+    assert "returned HTTP 400 body:" in caplog.text
+
+
+async def test_mqtt_auth_failure_invalidates_credentials_and_retries_once() -> None:
+    """Verify 403 WebSocket error refreshes credentials and retries once."""
     session = MagicMock()
     future_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
     session.post.side_effect = [
-        MockResponse(200, json.dumps({"IdentityId": "us-east-2:abc"})),
         MockResponse(
             200,
             json.dumps(
                 {
                     "Credentials": {
-                        "AccessKeyId": "AKIA1",
-                        "SecretKey": "SEC1",
-                        "SessionToken": "TOK1",
+                        "AccessKeyId": "AK_NEW",
+                        "SecretKey": "SK_NEW",
+                        "SessionToken": "ST_NEW",
                         "Expiration": future_exp,
                     }
                 }
             ),
-        ),
-    ]
-    shadow_payload = {"state": {"reported": {"mainTemp": 225}}}
-    session.request.side_effect = [
-        MockResponse(200, json.dumps(shadow_payload)),
-        MockResponse(200, json.dumps(shadow_payload)),
+        )
     ]
 
     client = _make_client(session)
-    first = await client.async_get_shadow()
-    second = await client.async_get_shadow()
+    client._identity_id = "us-east-2:id-1"
+    client._credentials = _valid_creds()
+    attempts = 0
 
-    assert first == shadow_payload
-    assert second == shadow_payload
-    assert session.post.call_count == 2
-    assert session.request.call_count == 2
+    class AuthRetryClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise mqtt.WebsocketConnectionError("HTTP 403 Forbidden")
+
+        def subscribe(self, topics: Any) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+            token = json.loads(payload)["clientToken"]
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/accepted",
+                    json.dumps({"clientToken": token, "state": {"reported": {"mainTemp": 230}}}).encode(),
+                ),
+            )
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", AuthRetryClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        result = await client.async_get_shadow()
+
+    assert attempts == 2
+    assert result["state"]["reported"]["mainTemp"] == 230
+    assert client._credentials.access_key_id == "AK_NEW"
 
 
-async def test_set_target_temperature_posts_desired_payload() -> None:
-    """Verify set_target_temperature sends the expected desired shadow JSON."""
-    session = MagicMock()
-    expected_payload = {"state": {"desired": {"heat": {"t2": {"trgt": 300}}}}}
-    session.request.return_value = MockResponse(200, json.dumps(expected_payload))
+async def test_mqtt_timeout_raises_api_error() -> None:
+    """Verify MQTT exchange timeout raises SpiderVenomApiError."""
+    client = _make_client()
+    client._credentials = _valid_creds()
 
-    client = _make_client(session)
-    client._credentials = _Credentials(
-        access_key_id="AKIA1",
-        secret_key="SEC1",
-        session_token="TOK1",
-        expiration=datetime.now(UTC) + timedelta(hours=1),
-        identity_id="us-east-2:abc",
-    )
+    class HangingClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
 
-    await client.async_set_target_temperature(300)
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
 
-    call = session.request.call_args
-    assert call.args[0] == "POST"
-    assert call.kwargs["data"] == '{"state":{"desired":{"heat":{"t2":{"trgt":300}}}}}'
-    assert call.kwargs["headers"]["Content-Type"] == "application/json"
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
 
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
 
-async def test_iot_shadow_errors_raise_api_error() -> None:
-    """Verify HTTP error, invalid JSON, and connection errors raise SpiderVenomApiError."""
-    session = MagicMock()
-    client = _make_client(session)
-    client._credentials = _Credentials(
-        access_key_id="AKIA1",
-        secret_key="SEC1",
-        session_token="TOK1",
-        expiration=datetime.now(UTC) + timedelta(hours=1),
-        identity_id="us-east-2:abc",
-    )
+        def loop_start(self) -> None:
+            pass
 
-    session.request.return_value = MockResponse(500, "server error")
-    with pytest.raises(SpiderVenomApiError, match="HTTP 500"):
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api._MQTT_TIMEOUT", 0.01),
+        patch("custom_components.spider_venom.api.mqtt.Client", HangingClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="timed out"),
+    ):
         await client.async_get_shadow()
 
-    session.request.return_value = MockResponse(200, "not-json")
-    with pytest.raises(SpiderVenomApiError, match="not JSON"):
-        await client.async_get_shadow()
 
-    session.request.side_effect = ClientConnectorError(MagicMock(), OSError("refused"))
+async def test_cognito_locking_identity_reuse_and_errors() -> None:
+    """Verify Cognito locking, identity_id reuse, HTTP status-before-JSON, and network errors."""
+    session = MagicMock()
+    future_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
+    post_calls: list[str] = []
+
+    def fake_post(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: ClientTimeout) -> MockResponse:
+        target = headers["X-Amz-Target"].split(".")[-1]
+        post_calls.append(target)
+        assert timeout == DEFAULT_TIMEOUT
+        if target == "GetId":
+            return MockResponse(200, '{"IdentityId":"us-east-2:id-1"}')
+        return MockResponse(
+            200,
+            f'{{"Credentials":{{"AccessKeyId":"AK1","SecretKey":"SK1","SessionToken":"ST1","Expiration":{future_exp}}}}}',
+        )
+
+    session.post.side_effect = fake_post
+    client = _make_client(session)
+    results = await asyncio.gather(*(client._async_get_credentials() for _ in range(5)))
+    assert all(r.identity_id == "us-east-2:id-1" for r in results)
+    assert post_calls == ["GetId", "GetCredentialsForIdentity"]
+
+    client._credentials = _Credentials(
+        access_key_id="AK1",
+        secret_key="SK1",
+        session_token="ST1",
+        expiration=datetime.now(UTC) + timedelta(minutes=1),
+        identity_id="us-east-2:id-1",
+    )
+    await client._async_get_credentials()
+    assert post_calls == ["GetId", "GetCredentialsForIdentity", "GetCredentialsForIdentity"]
+
+    session.post.side_effect = None
+    session.post.return_value = MockResponse(503, "Service Unavailable")
+    with pytest.raises(SpiderVenomApiError, match="HTTP 503"):
+        await client._async_cognito_post("GetId", {"IdentityPoolId": "pool"})
+
+    session.post.side_effect = ClientConnectorError(MagicMock(), OSError("refused"))
     with pytest.raises(SpiderVenomApiError, match="could not connect"):
-        await client.async_get_shadow()
+        await client._async_cognito_post("GetId", {"IdentityPoolId": "pool"})
 
 
-async def test_account_client_login_and_get_devices() -> None:
-    """Verify SpiderGrillsAccountClient login and device list shape handling."""
+async def test_account_client_login_devices_and_http_checks() -> None:
+    """Verify SpiderGrillsAccountClient login, auth error, shape guards, and status checks."""
     session = MagicMock()
     account = SpiderGrillsAccountClient(session=session)
 
     session.request.return_value = MockResponse(200, json.dumps({"accessToken": "tok-123"}))
     assert await account.async_login(email="user@example.com", password="pw") == "tok-123"
+    assert session.request.call_args.kwargs["timeout"] == DEFAULT_TIMEOUT
 
-    session.request.return_value = MockResponse(200, json.dumps({}))
-    with pytest.raises(SpiderVenomApiError, match="access token"):
+    session.request.return_value = MockResponse(200, "[]")
+    with pytest.raises(SpiderVenomApiError, match="unexpected shape"):
         await account.async_login(email="user@example.com", password="pw")
 
-    session.request.return_value = MockResponse(401, json.dumps({"message": "Unauthorized"}))
-    with pytest.raises(SpiderVenomApiError, match="HTTP 401"):
+    session.request.return_value = MockResponse(401, "Unauthorized")
+    with pytest.raises(SpiderVenomAuthError, match="HTTP 401"):
+        await account.async_login(email="user@example.com", password="pw")
+
+    session.request.return_value = MockResponse(502, "<html>Bad Gateway</html>")
+    with pytest.raises(SpiderVenomApiError, match="HTTP 502"):
         await account.async_login(email="user@example.com", password="pw")
 
     for payload in (
@@ -184,24 +456,25 @@ async def test_account_client_login_and_get_devices() -> None:
         {"devices": [{"thingName": "v1"}]},
     ):
         session.request.return_value = MockResponse(200, json.dumps(payload))
-        devices = await account.async_get_devices("tok-123")
-        assert devices == [{"thingName": "v1"}]
+        assert await account.async_get_devices("tok-123") == [{"thingName": "v1"}]
 
-    session.request.return_value = MockResponse(200, json.dumps({"unexpected": True}))
+    session.request.return_value = MockResponse(200, "null")
     with pytest.raises(SpiderVenomApiError, match="unexpected shape"):
         await account.async_get_devices("tok-123")
 
 
-def test_redacted_body_masks_sensitive_fields() -> None:
-    """Verify sensitive JSON keys are masked by _redacted_body."""
+def test_redacted_body_masks_sensitive_fields_and_truncates() -> None:
+    """Verify normalized key redaction, truncation, and login non-JSON omission."""
     raw = json.dumps(
         {
             "accessToken": "secret-access",
             "refreshToken": "secret-refresh",
             "password": "secret-password",
+            "email": "user@example.com",
+            "identityId": "us-east-2:123",
             "Credentials": {
                 "AccessKeyId": "AKIASECRET",
-                "SecretKey": "SECRETKEY",
+                "secret_access_key": "SECRETKEY",
                 "SessionToken": "SESSIONTOK",
             },
             "device": {"thingName": "venom-1"},
@@ -212,7 +485,12 @@ def test_redacted_body_masks_sensitive_fields() -> None:
     assert redacted["accessToken"] == "***REDACTED***"
     assert redacted["refreshToken"] == "***REDACTED***"
     assert redacted["password"] == "***REDACTED***"
+    assert redacted["email"] == "***REDACTED***"
+    assert redacted["identityId"] == "***REDACTED***"
     assert redacted["Credentials"]["AccessKeyId"] == "***REDACTED***"
-    assert redacted["Credentials"]["SecretKey"] == "***REDACTED***"
+    assert redacted["Credentials"]["secret_access_key"] == "***REDACTED***"
     assert redacted["Credentials"]["SessionToken"] == "***REDACTED***"
     assert redacted["device"]["thingName"] == "venom-1"
+
+    assert _redacted_body("<html>err</html>", redact_non_json=True) == "<non-JSON response body omitted>"
+    assert _redacted_body(json.dumps({"data": "x" * 5000})).endswith("...<truncated>")
