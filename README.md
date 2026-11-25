@@ -17,10 +17,12 @@ The integration does not store your Spider Grills password or access token after
 
 ### HACS
 
-In HACS, add this repository as a custom repository with category `Integration`, then install it from HACS:
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=edalquist&repository=spider-venom-home-assistant&category=integration)
+
+Or manually in HACS, add this repository as a custom repository with category `Integration`, then install it from HACS:
 
 ```text
-https://github.com/brannonjames/spider-venom-home-assistant
+https://github.com/edalquist/spider-venom-home-assistant
 ```
 
 Restart Home Assistant after installation, then add `Spider Grills Venom` from Settings -> Devices & services.
