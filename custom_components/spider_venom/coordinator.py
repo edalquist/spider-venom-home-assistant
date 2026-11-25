@@ -19,6 +19,8 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_OPTIMISTIC_TTL = timedelta(seconds=60)
 
+type SpiderVenomConfigEntry = ConfigEntry[SpiderVenomDataUpdateCoordinator]
+
 
 @dataclass(slots=True)
 class _OptimisticEntry:
@@ -58,10 +60,13 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         hass: HomeAssistant,
         client: SpiderVenomClient,
-        entry: ConfigEntry,
+        entry: SpiderVenomConfigEntry,
     ) -> None:
         """Initialize the coordinator."""
-        interval_seconds = entry.data.get(CONF_SCAN_INTERVAL)
+        interval_seconds = entry.options.get(
+            CONF_SCAN_INTERVAL,
+            entry.data.get(CONF_SCAN_INTERVAL),
+        )
         interval = (
             timedelta(seconds=interval_seconds)
             if isinstance(interval_seconds, int)
@@ -72,11 +77,11 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=interval,
         )
         self.client = client
-        self.entry = entry
         self._optimistic: dict[tuple[str, ...], _OptimisticEntry] = {}
 
     async def _async_update_data(self) -> dict[str, Any]:
