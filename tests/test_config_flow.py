@@ -76,9 +76,9 @@ async def test_user_flow_creates_entry_without_storing_credentials(hass: HomeAss
     assert result3["title"] == "Patio Grill (venom-abc)"
     assert result3["data"][CONF_THING_NAME] == "venom-abc"
     assert result3["data"][CONF_SCAN_INTERVAL] == 45
-    assert CONF_ENDPOINT in result3["data"]
-    assert CONF_IDENTITY_POOL_ID in result3["data"]
-    assert CONF_REGION in result3["data"]
+    assert CONF_ENDPOINT not in result3["data"]
+    assert CONF_IDENTITY_POOL_ID not in result3["data"]
+    assert CONF_REGION not in result3["data"]
     assert CONF_EMAIL not in result3["data"]
     assert CONF_PASSWORD not in result3["data"]
 

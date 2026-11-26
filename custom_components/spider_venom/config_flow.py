@@ -20,9 +20,6 @@ from homeassistant.helpers.selector import (
 
 from .api import SpiderGrillsAccountClient, SpiderVenomApiError, SpiderVenomClient
 from .const import (
-    CONF_ENDPOINT,
-    CONF_IDENTITY_POOL_ID,
-    CONF_REGION,
     CONF_THING_NAME,
     DEFAULT_ENDPOINT,
     DEFAULT_IDENTITY_POOL_ID,
@@ -185,9 +182,6 @@ class SpiderVenomConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title=title,
             data={
-                CONF_ENDPOINT: endpoint,
-                CONF_IDENTITY_POOL_ID: identity_pool_id,
-                CONF_REGION: region,
                 CONF_THING_NAME: thing_name,
                 CONF_SCAN_INTERVAL: scan_interval,
             },
