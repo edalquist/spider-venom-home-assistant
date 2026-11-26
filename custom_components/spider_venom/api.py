@@ -30,6 +30,8 @@ _MQTT_CONNECT_TIMEOUT = 10.0
 _INITIAL_RECONNECT_BACKOFF = 2.0
 _MAX_RECONNECT_BACKOFF = 60.0
 _MIN_ROTATION_DELAY = 60.0
+_PERSISTENT_READY_WAIT = 5.0
+_ROTATION_DRAIN_WAIT = 2.0
 _MAX_DEBUG_LOG_CHARS = 4096
 _MAX_NON_JSON_LOG_CHARS = 500
 _REDACTED_KEYS = {
@@ -142,6 +144,7 @@ class SpiderVenomClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._wake_event: asyncio.Event | None = None
+        self._ready_event: asyncio.Event | None = None
         self._initial_ready_event: asyncio.Event | None = None
         self._initial_error: SpiderVenomApiError | None = None
         self._stopping = False
@@ -182,6 +185,7 @@ class SpiderVenomClient:
         self._loop = asyncio.get_running_loop()
         self._stopping = False
         self._wake_event = asyncio.Event()
+        self._ready_event = asyncio.Event()
         self._initial_ready_event = asyncio.Event()
         self._initial_error = None
         self._runner_task = asyncio.create_task(
@@ -404,76 +408,97 @@ class SpiderVenomClient:
                 loop.call_soon_threadsafe(attempt_state.on_disconnect, reason_code)
 
             try:
-                credentials = await self._async_get_credentials()
-                ws_path = self._presigned_ws_path(credentials)
-                ssl_ctx = await loop.run_in_executor(None, self._get_ssl_context)
+                try:
+                    credentials = await self._async_get_credentials()
+                    ws_path = self._presigned_ws_path(credentials)
+                    ssl_ctx = await loop.run_in_executor(None, self._get_ssl_context)
 
-                client = mqtt.Client(
-                    mqtt.CallbackAPIVersion.VERSION2,
-                    client_id=str(uuid.uuid4()),
-                    transport="websockets",
-                    reconnect_on_failure=False,
-                )
-                client.connect_timeout = _MQTT_CONNECT_TIMEOUT
-                client.ws_set_options(path=ws_path)
-                client.tls_set_context(ssl_ctx)
-                client.on_connect = on_connect
-                client.on_subscribe = on_subscribe
-                client.on_message = on_message
-                client.on_disconnect = on_disconnect
-
-                await loop.run_in_executor(
-                    None,
-                    partial(self._connect_and_start_client, client, honor_stopping=True),
-                )
-                if self._stopping:
-                    break
-
-                wake_event = self._wake_event
-                assert wake_event is not None
-                if not await _async_wait_any((state.subscribe_event, wake_event), _MQTT_TIMEOUT):
-                    raise TimeoutError
-                if self._stopping:
-                    break
-
-                if state.subscribe_error is not None:
-                    raise SpiderVenomApiError(state.subscribe_error[0], status=state.subscribe_error[1])
-                if state.disconnect_event.is_set():
-                    msg, status = state.disconnect_error or ("MQTT disconnected during connect", None)
-                    raise SpiderVenomApiError(msg, status=status)
-
-                self._mqtt_client = client
-                self._ready = True
-                backoff = _INITIAL_RECONNECT_BACKOFF
-                was_connected = connected_once
-                connected_once = True
-                if self._initial_ready_event is not None:
-                    self._initial_ready_event.set()
-                if was_connected and self._on_reconnect is not None:
-                    self._on_reconnect()
-
-                raw_rotation_delay = (
-                    credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)
-                ).total_seconds()
-                if raw_rotation_delay <= 0:
-                    _LOGGER.warning(
-                        "Cognito credentials expire in <=5m (possible clock skew); delaying rotation by %.0fs",
-                        _MIN_ROTATION_DELAY,
+                    client = mqtt.Client(
+                        mqtt.CallbackAPIVersion.VERSION2,
+                        client_id=str(uuid.uuid4()),
+                        transport="websockets",
+                        reconnect_on_failure=False,
                     )
-                    rotation_delay = _MIN_ROTATION_DELAY
-                else:
-                    rotation_delay = raw_rotation_delay
-                await _async_wait_any((state.disconnect_event, wake_event), rotation_delay)
+                    client.connect_timeout = _MQTT_CONNECT_TIMEOUT
+                    client.ws_set_options(path=ws_path)
+                    client.tls_set_context(ssl_ctx)
+                    client.on_connect = on_connect
+                    client.on_subscribe = on_subscribe
+                    client.on_message = on_message
+                    client.on_disconnect = on_disconnect
 
-                if self._stopping:
-                    break
+                    await loop.run_in_executor(
+                        None,
+                        partial(self._connect_and_start_client, client, honor_stopping=True),
+                    )
+                    if self._stopping:
+                        break
 
-                if state.disconnect_event.is_set():
-                    msg, status = state.disconnect_error or ("MQTT disconnected", None)
-                    raise SpiderVenomApiError(msg, status=status)
+                    wake_event = self._wake_event
+                    assert wake_event is not None
+                    if not await _async_wait_any((state.subscribe_event, wake_event), _MQTT_TIMEOUT):
+                        raise TimeoutError
+                    if self._stopping:
+                        break
 
-                # Credential rotation threshold reached; reconnect proactively with fresh credentials.
-                self._credentials = None
+                    if state.subscribe_error is not None:
+                        raise SpiderVenomApiError(state.subscribe_error[0], status=state.subscribe_error[1])
+                    if state.disconnect_event.is_set():
+                        msg, status = state.disconnect_error or ("MQTT disconnected during connect", None)
+                        raise SpiderVenomApiError(msg, status=status)
+
+                    self._mqtt_client = client
+                    self._ready = True
+                    if self._ready_event is not None:
+                        self._ready_event.set()
+                    backoff = _INITIAL_RECONNECT_BACKOFF
+                    was_connected = connected_once
+                    connected_once = True
+                    if self._initial_ready_event is not None:
+                        self._initial_ready_event.set()
+                    if was_connected and self._on_reconnect is not None:
+                        self._on_reconnect()
+
+                    raw_rotation_delay = (
+                        credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)
+                    ).total_seconds()
+                    if raw_rotation_delay <= 0:
+                        _LOGGER.warning(
+                            "Cognito credentials expire in <=5m (possible clock skew); delaying rotation by %.0fs",
+                            _MIN_ROTATION_DELAY,
+                        )
+                        rotation_delay = _MIN_ROTATION_DELAY
+                    else:
+                        rotation_delay = raw_rotation_delay
+                    await _async_wait_any((state.disconnect_event, wake_event), rotation_delay)
+
+                    if self._stopping:
+                        break
+
+                    if state.disconnect_event.is_set():
+                        msg, status = state.disconnect_error or ("MQTT disconnected", None)
+                        raise SpiderVenomApiError(msg, status=status)
+
+                    # Credential rotation threshold reached; drain in-flight requests then rotate.
+                    self._ready = False
+                    if self._ready_event is not None:
+                        self._ready_event.clear()
+                    if self._pending:
+                        with contextlib.suppress(BaseException):
+                            await asyncio.wait(
+                                list(self._pending.values()),
+                                timeout=_ROTATION_DRAIN_WAIT,
+                            )
+                    self._credentials = None
+                finally:
+                    self._ready = False
+                    if self._ready_event is not None:
+                        self._ready_event.clear()
+                    if self._mqtt_client is client:
+                        self._mqtt_client = None
+                    self._fail_pending(SpiderVenomApiError("IoT MQTT connection closed"))
+                    if client is not None:
+                        await loop.run_in_executor(None, self._teardown_client, client)
 
             except TimeoutError:
                 err = SpiderVenomApiError(f"IoT MQTT subscribe timed out after {_MQTT_TIMEOUT}s")
@@ -514,13 +539,6 @@ class SpiderVenomClient:
                     break
                 await self._async_sleep_interruptible(backoff)
                 backoff = min(backoff * 2, _MAX_RECONNECT_BACKOFF)
-            finally:
-                self._ready = False
-                if self._mqtt_client is client:
-                    self._mqtt_client = None
-                self._fail_pending(SpiderVenomApiError("IoT MQTT connection closed"))
-                if client is not None:
-                    await loop.run_in_executor(None, self._teardown_client, client)
 
     async def _async_sleep_interruptible(self, delay: float) -> None:
         """Wait for delay seconds or until async_stop wakes the loop."""
@@ -538,7 +556,13 @@ class SpiderVenomClient:
         Uses the persistent connection when active, or opens a short-lived connection
         for standalone validation calls (such as config flow setup).
         """
-        if self._ready and self._mqtt_client is not None and self._loop is not None:
+        if self._runner_task is not None and not self._runner_task.done():
+            if not self._ready and self._ready_event is not None:
+                with contextlib.suppress(TimeoutError):
+                    async with asyncio.timeout(_PERSISTENT_READY_WAIT):
+                        await self._ready_event.wait()
+            if not (self._ready and self._mqtt_client is not None and self._loop is not None):
+                raise SpiderVenomApiError("IoT MQTT persistent connection is not ready")
             token = uuid.uuid4().hex
             message = json.dumps({**payload, "clientToken": token}, separators=(",", ":"))
             topic = f"$aws/things/{self._thing_name}/shadow/{action}"

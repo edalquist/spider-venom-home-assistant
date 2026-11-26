@@ -1334,3 +1334,84 @@ async def test_persistent_mqtt_invokes_on_reconnect_only_after_first_connect() -
         await asyncio.wait_for(reconnected_event.wait(), timeout=1.0)
         assert reconnect_calls == 1
         await client.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_waits_for_rotation_and_skips_short_lived_fallback() -> None:
+    """Verify persistent mode waits for readiness during reconnect/rotation and avoids _mqtt_shadow_call."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    created: list[Any] = []
+    ready_to_reconnect = asyncio.Event()
+
+    class RotatingWaitClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
+            token = json.loads(payload)["clientToken"]
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/accepted",
+                    json.dumps({"clientToken": token, "state": {"reported": {"mainTemp": 288}}}).encode(),
+                ),
+            )
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    async def gated_sleep(_delay: float) -> None:
+        await ready_to_reconnect.wait()
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", RotatingWaitClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_sleep_interruptible", side_effect=gated_sleep),
+        patch.object(client, "_mqtt_shadow_call", side_effect=AssertionError("fallback called")),
+    ):
+        await client.async_start(lambda _doc: None)
+
+        # Simulate drop -> persistent mode is active but temporarily not ready
+        created[0].on_disconnect(created[0], None, None, FakeReasonCode(True, "Unspecified error"))
+        await asyncio.sleep(0.02)
+        assert not client._ready
+
+        # While still down past _PERSISTENT_READY_WAIT, fail fast without _mqtt_shadow_call
+        with (
+            patch("custom_components.spider_venom.api._PERSISTENT_READY_WAIT", 0.03),
+            pytest.raises(SpiderVenomApiError, match="persistent connection is not ready"),
+        ):
+            await client.async_get_shadow()
+
+        # When request arrives just before reconnect completes, it waits for _ready_event and succeeds
+        shadow_task = asyncio.create_task(client.async_get_shadow())
+        await asyncio.sleep(0.01)
+        ready_to_reconnect.set()
+        shadow = await asyncio.wait_for(shadow_task, timeout=1.0)
+        assert shadow["state"]["reported"]["mainTemp"] == 288
+        await client.async_stop()
