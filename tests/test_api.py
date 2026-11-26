@@ -136,9 +136,17 @@ async def test_mqtt_shadow_get_and_update_filters_client_token_and_caches_ssl() 
     published_messages: list[tuple[str, str]] = []
 
     class FakeClient:
-        def __init__(self, api_version: Any, *, client_id: str, transport: str) -> None:
+        def __init__(
+            self,
+            api_version: Any,
+            *,
+            client_id: str,
+            transport: str,
+            reconnect_on_failure: bool = True,
+        ) -> None:
             assert api_version is mqtt.CallbackAPIVersion.VERSION2
             assert transport == "websockets"
+            assert reconnect_on_failure is False
             assert str(uuid.UUID(client_id)) == client_id
             self.connect_timeout: float = 0.0
             self.on_connect: Any = None
@@ -506,7 +514,15 @@ async def test_persistent_mqtt_push_subscriptions_requests_and_stop() -> None:
     pushed_docs: list[dict[str, Any]] = []
 
     class PersistentFakeClient:
-        def __init__(self, api_version: Any, *, client_id: str, transport: str) -> None:
+        def __init__(
+            self,
+            api_version: Any,
+            *,
+            client_id: str,
+            transport: str,
+            reconnect_on_failure: bool = True,
+        ) -> None:
+            assert reconnect_on_failure is False
             self.on_connect: Any = None
             self.on_subscribe: Any = None
             self.on_message: Any = None

@@ -384,6 +384,7 @@ class SpiderVenomClient:
                     mqtt.CallbackAPIVersion.VERSION2,
                     client_id=str(uuid.uuid4()),
                     transport="websockets",
+                    reconnect_on_failure=False,
                 )
                 client.connect_timeout = _MQTT_CONNECT_TIMEOUT
                 client.ws_set_options(path=ws_path)
@@ -618,6 +619,7 @@ class SpiderVenomClient:
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=str(uuid.uuid4()),
             transport="websockets",
+            reconnect_on_failure=False,
         )
         client.connect_timeout = _MQTT_CONNECT_TIMEOUT
         client.ws_set_options(path=ws_path)
