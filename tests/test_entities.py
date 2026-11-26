@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
+from custom_components.spider_venom.api import SpiderVenomApiError
 from custom_components.spider_venom.binary_sensor import BINARY_SENSORS
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
@@ -397,3 +398,88 @@ def test_entity_translation_keys_present_in_translations() -> None:
     assert en["entity"]["switch"]["power_control"]["name"] == "Power"
     assert en["entity"]["switch"]["paused_control"]["name"] == "Pause"
     assert en["entity"]["switch"]["engaged_control"]["name"] == "Temperature control"
+
+
+async def test_switch_and_number_api_error_skips_optimistic(hass: HomeAssistant) -> None:
+    """Verify switch and number API errors raise HomeAssistantError without setting optimistic state."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=deepcopy(SAMPLE_SHADOW),
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_update_desired",
+            new_callable=AsyncMock,
+            side_effect=SpiderVenomApiError("write failed"),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        power_entity = _entity_id_by_key(hass, "switch", "power_control")
+        with pytest.raises(HomeAssistantError, match="Unable to update Venom control"):
+            await hass.services.async_call("switch", "turn_off", {"entity_id": power_entity}, blocking=True)
+
+        target_entity = _entity_id_by_key(hass, "number", "target_temperature_control")
+        with pytest.raises(HomeAssistantError, match="Unable to set"):
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": target_entity, "value": 300},
+                blocking=True,
+            )
+
+    assert not entry.runtime_data._optimistic
+
+
+async def test_metric_number_set_value_converts_celsius_to_fahrenheit(hass: HomeAssistant) -> None:
+    """Verify metric user setting number in °C writes rounded °F to desired shadow."""
+    hass.config.units = METRIC_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=deepcopy(SAMPLE_SHADOW),
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_update_desired",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as mock_update,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        target_entity = _entity_id_by_key(hass, "number", "target_temperature_control")
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": target_entity, "value": 121.1},
+            blocking=True,
+        )
+
+    mock_update.assert_called_once_with({"heat": {"t2": {"trgt": 250}}})
+
+
+async def test_entities_handle_empty_shadow_safely(hass: HomeAssistant) -> None:
+    """Verify entities set up cleanly with unknown states when shadow is empty."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value={},
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "main_temp")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "door")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "number", "target_temperature_control")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "switch", "power_control")) == "unknown"

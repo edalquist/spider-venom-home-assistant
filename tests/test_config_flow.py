@@ -261,3 +261,64 @@ def test_device_helpers() -> None:
     assert _device_label({"name": "Kettle"}, "t1") == "Kettle (t1)"
     assert _device_label({"model": "Venom"}, "t1") == "Venom (t1)"
     assert _device_label({}, "t1") == "t1"
+
+
+async def test_config_flow_unexpected_errors_and_get_devices_failure(hass: HomeAssistant) -> None:
+    """Verify unexpected exceptions produce unknown error and device fetch failure produces cannot_connect."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_login",
+        side_effect=RuntimeError("boom"),
+    ):
+        unknown_account = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "pw", CONF_SCAN_INTERVAL: 30},
+        )
+    assert unknown_account["type"] is FlowResultType.FORM
+    assert unknown_account["errors"] == {"base": "unknown"}
+
+    with (
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_login",
+            return_value="tok",
+        ),
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_get_devices",
+            side_effect=SpiderVenomApiError("device list down"),
+        ),
+    ):
+        dev_err = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "pw", CONF_SCAN_INTERVAL: 30},
+        )
+    assert dev_err["type"] is FlowResultType.FORM
+    assert dev_err["errors"] == {"base": "cannot_connect"}
+
+    with (
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_login",
+            return_value="tok",
+        ),
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_get_devices",
+            return_value=[{"thingName": "venom-abc"}],
+        ),
+    ):
+        step2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "pw", CONF_SCAN_INTERVAL: 30},
+        )
+
+    with patch(
+        "custom_components.spider_venom.config_flow.SpiderVenomClient.async_test_connection",
+        side_effect=RuntimeError("unexpected validation error"),
+    ):
+        unknown_select = await hass.config_entries.flow.async_configure(
+            step2["flow_id"],
+            {CONF_THING_NAME: "venom-abc"},
+        )
+    assert unknown_select["type"] is FlowResultType.FORM
+    assert unknown_select["errors"] == {"base": "unknown"}

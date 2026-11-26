@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import voluptuous as vol
 import yaml
 
 from custom_components.spider_venom.api import SpiderVenomApiError
@@ -20,6 +21,7 @@ from custom_components.spider_venom.const import (
     DOMAIN,
     SERVICE_SET_TARGET_TEMPERATURE,
 )
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, service
@@ -296,3 +298,67 @@ async def test_set_target_temperature_service_device_and_entity_targets(hass: Ho
                 target={"device_id": "nonexistent-device-id"},
                 blocking=True,
             )
+
+        # Multi-device list targets update all specified devices
+        device1 = dev_reg.async_get_device(identifiers={(DOMAIN, MOCK_THING_NAME)})
+        assert device1 is not None
+        mock_set_temp.reset_mock()
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_TARGET_TEMPERATURE,
+            {ATTR_TEMPERATURE: 290},
+            target={"device_id": [device1.id, device2.id]},
+            blocking=True,
+        )
+        assert mock_set_temp.call_count == 2
+
+        # Out-of-range temperature fails schema validation
+        with pytest.raises(vol.Invalid):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_SET_TARGET_TEMPERATURE,
+                {ATTR_TEMPERATURE: 100},
+                target={"device_id": device1.id},
+                blocking=True,
+            )
+
+
+async def test_setup_stops_push_when_first_refresh_fails_and_on_ha_stop(hass: HomeAssistant) -> None:
+    """Verify async_stop_push runs when first refresh fails and when EVENT_HOMEASSISTANT_STOP fires."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            side_effect=SpiderVenomApiError("initial poll timeout"),
+        ),
+        patch(
+            "custom_components.spider_venom.coordinator.SpiderVenomDataUpdateCoordinator.async_stop_push",
+            new_callable=AsyncMock,
+        ) as mock_stop_push,
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state.name == "SETUP_RETRY"
+    mock_stop_push.assert_awaited_once()
+
+    entry2 = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id="venom-ha-stop")
+    entry2.add_to_hass(hass)
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=SAMPLE_SHADOW,
+        ),
+        patch(
+            "custom_components.spider_venom.coordinator.SpiderVenomDataUpdateCoordinator.async_stop_push",
+            new_callable=AsyncMock,
+        ) as mock_stop_push2,
+    ):
+        assert await hass.config_entries.async_setup(entry2.entry_id)
+        await hass.async_block_till_done()
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+        await hass.async_block_till_done()
+
+    mock_stop_push2.assert_awaited_once()
