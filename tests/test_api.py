@@ -1191,3 +1191,89 @@ async def test_persistent_mqtt_unexpected_exception_fails_fast_and_recovers_on_r
         assert ws_calls >= 3
         assert "Unexpected error in Spider Venom MQTT loop" in caplog.text
         await client2.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_clamps_rotation_delay_under_clock_skew(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify near-expiry Cognito credentials clamp rotation delay to _MIN_ROTATION_DELAY."""
+    session = MagicMock()
+    soon_exp = (datetime.now(UTC) + timedelta(minutes=2)).timestamp()
+    later_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
+    session.post.side_effect = [
+        MockResponse(
+            200,
+            json.dumps(
+                {
+                    "Credentials": {
+                        "AccessKeyId": "AK_SKEW",
+                        "SecretKey": "SK_SKEW",
+                        "SessionToken": "ST_SKEW",
+                        "Expiration": soon_exp,
+                    }
+                }
+            ),
+        ),
+        MockResponse(
+            200,
+            json.dumps(
+                {
+                    "Credentials": {
+                        "AccessKeyId": "AK_ROTATED",
+                        "SecretKey": "SK_ROTATED",
+                        "SessionToken": "ST_ROTATED",
+                        "Expiration": later_exp,
+                    }
+                }
+            ),
+        ),
+    ]
+    client = _make_client(session)
+    client._identity_id = "us-east-2:id-1"
+    rotated_event = asyncio.Event()
+    created: list[Any] = []
+
+    class SkewClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            if len(created) >= 2:
+                rotated_event.set()
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        caplog.at_level(logging.WARNING, logger="custom_components.spider_venom.api"),
+        patch("custom_components.spider_venom.api._MIN_ROTATION_DELAY", 0.05),
+        patch("custom_components.spider_venom.api.mqtt.Client", SkewClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        await client.async_start(lambda _doc: None)
+        assert len(created) == 1
+        await asyncio.wait_for(rotated_event.wait(), timeout=1.0)
+        assert len(created) == 2
+        assert "delaying rotation" in caplog.text
+        await client.async_stop()

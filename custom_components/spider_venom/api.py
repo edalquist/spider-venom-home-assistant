@@ -29,6 +29,7 @@ _MQTT_TIMEOUT = 15
 _MQTT_CONNECT_TIMEOUT = 10.0
 _INITIAL_RECONNECT_BACKOFF = 2.0
 _MAX_RECONNECT_BACKOFF = 60.0
+_MIN_ROTATION_DELAY = 60.0
 _MAX_DEBUG_LOG_CHARS = 4096
 _MAX_NON_JSON_LOG_CHARS = 500
 _REDACTED_KEYS = {
@@ -442,10 +443,17 @@ class SpiderVenomClient:
                 if self._initial_ready_event is not None:
                     self._initial_ready_event.set()
 
-                rotation_delay = max(
-                    0.0,
-                    (credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)).total_seconds(),
-                )
+                raw_rotation_delay = (
+                    credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)
+                ).total_seconds()
+                if raw_rotation_delay <= 0:
+                    _LOGGER.warning(
+                        "Cognito credentials expire in <=5m (possible clock skew); delaying rotation by %.0fs",
+                        _MIN_ROTATION_DELAY,
+                    )
+                    rotation_delay = _MIN_ROTATION_DELAY
+                else:
+                    rotation_delay = raw_rotation_delay
                 await _async_wait_any((state.disconnect_event, wake_event), rotation_delay)
 
                 if self._stopping:
