@@ -61,13 +61,12 @@ data:
   temperature: 300
 ```
 
-If multiple Venoms are configured, pass a `target` (`device_id` or `entity_id`) or `thing_name`:
+If multiple Venoms are configured, pass `device_id` (or `thing_name` / `target`):
 
 ```yaml
 action: spider_venom.set_target_temperature
-target:
-  device_id: your_venom_device_id
 data:
+  device_id: your_venom_device_id
   temperature: 300
 ```
 

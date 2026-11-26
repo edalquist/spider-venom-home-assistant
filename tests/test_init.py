@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import yaml
 
 from custom_components.spider_venom.api import SpiderVenomApiError
 from custom_components.spider_venom.const import (
@@ -21,7 +22,7 @@ from custom_components.spider_venom.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, service
 
 from .conftest import MOCK_ENTRY_DATA, MOCK_THING_NAME, SAMPLE_SHADOW, make_shadow
 
@@ -34,6 +35,19 @@ def test_manifest_metadata() -> None:
     assert manifest["integration_type"] == "device"
     assert manifest["iot_class"] == "cloud_push"
     assert "paho-mqtt>=2.1.0" in manifest["requirements"]
+
+
+def test_services_yaml_schema() -> None:
+    """Verify services.yaml conforms to Home Assistant schema without target.device."""
+    raw = yaml.safe_load(
+        Path("custom_components/spider_venom/services.yaml").read_text(encoding="utf-8")
+    )
+    validated = service._SERVICES_SCHEMA(raw)
+    assert SERVICE_SET_TARGET_TEMPERATURE in validated
+    for service_def in raw.values():
+        target = service_def.get("target")
+        if isinstance(target, dict):
+            assert "device" not in target
 
 
 async def test_setup_raises_config_entry_not_ready_when_push_connect_fails(hass: HomeAssistant) -> None:
@@ -248,6 +262,16 @@ async def test_set_target_temperature_service_device_and_entity_targets(hass: Ho
         )
         mock_set_temp.assert_called_once_with(315)
         assert entry2.runtime_data.get_optimistic_value(("heat", "t2", "trgt")) == (True, 315)
+
+        mock_set_temp.reset_mock()
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_TARGET_TEMPERATURE,
+            {ATTR_TEMPERATURE: 320, "device_id": device2.id},
+            blocking=True,
+        )
+        mock_set_temp.assert_called_once_with(320)
+        assert entry2.runtime_data.get_optimistic_value(("heat", "t2", "trgt")) == (True, 320)
 
         mock_set_temp.reset_mock()
         ent_reg = er.async_get(hass)
