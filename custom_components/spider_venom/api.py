@@ -138,6 +138,7 @@ class SpiderVenomClient:
 
         # Persistent MQTT push state
         self._on_shadow_update: Callable[[dict[str, Any]], None] | None = None
+        self._on_reconnect: Callable[[], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._wake_event: asyncio.Event | None = None
@@ -167,9 +168,14 @@ class SpiderVenomClient:
         """Fetch a shadow once to validate config."""
         return await self.async_get_shadow()
 
-    async def async_start(self, on_shadow_update: Callable[[dict[str, Any]], None]) -> None:
+    async def async_start(
+        self,
+        on_shadow_update: Callable[[dict[str, Any]], None],
+        on_reconnect: Callable[[], None] | None = None,
+    ) -> None:
         """Start the persistent MQTT-over-WebSocket connection and wait until subscribed."""
         self._on_shadow_update = on_shadow_update
+        self._on_reconnect = on_reconnect
         if self._runner_task is not None and not self._runner_task.done():
             return
 
@@ -439,9 +445,12 @@ class SpiderVenomClient:
                 self._mqtt_client = client
                 self._ready = True
                 backoff = _INITIAL_RECONNECT_BACKOFF
+                was_connected = connected_once
                 connected_once = True
                 if self._initial_ready_event is not None:
                     self._initial_ready_event.set()
+                if was_connected and self._on_reconnect is not None:
+                    self._on_reconnect()
 
                 raw_rotation_delay = (
                     credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)

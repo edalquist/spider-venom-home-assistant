@@ -483,3 +483,21 @@ async def test_entities_handle_empty_shadow_safely(hass: HomeAssistant) -> None:
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "door")) == "unknown"
     assert _state(hass, _entity_id_by_key(hass, "number", "target_temperature_control")) == "unknown"
     assert _state(hass, _entity_id_by_key(hass, "switch", "power_control")) == "unknown"
+
+
+async def test_coordinator_reconnect_callback_requests_refresh(hass: HomeAssistant) -> None:
+    """Verify coordinator's on_reconnect callback requests a shadow refresh."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=deepcopy(SAMPLE_SHADOW),
+    ) as mock_get:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        initial_calls = mock_get.call_count
+
+        entry.runtime_data._handle_reconnect()
+        await hass.async_block_till_done()
+        assert mock_get.call_count == initial_calls + 1

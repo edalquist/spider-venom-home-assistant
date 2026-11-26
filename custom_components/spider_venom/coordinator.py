@@ -86,11 +86,16 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_start_push(self) -> None:
         """Start the persistent MQTT push connection."""
-        await self.client.async_start(self._handle_push_update)
+        await self.client.async_start(self._handle_push_update, on_reconnect=self._handle_reconnect)
 
     async def async_stop_push(self) -> None:
         """Stop the persistent MQTT push connection."""
         await self.client.async_stop()
+
+    @callback
+    def _handle_reconnect(self) -> None:
+        """Request a shadow refresh after persistent MQTT reconnects."""
+        self.hass.async_create_task(self.async_request_refresh())
 
     @callback
     def _handle_push_update(self, data: dict[str, Any]) -> None:

@@ -1277,3 +1277,60 @@ async def test_persistent_mqtt_clamps_rotation_delay_under_clock_skew(
         assert len(created) == 2
         assert "delaying rotation" in caplog.text
         await client.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_invokes_on_reconnect_only_after_first_connect() -> None:
+    """Verify on_reconnect fires on subsequent reconnects, not initial connect."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    reconnect_calls = 0
+    reconnected_event = asyncio.Event()
+    created: list[Any] = []
+
+    class ReconnectHookClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    def on_reconnect() -> None:
+        nonlocal reconnect_calls
+        reconnect_calls += 1
+        reconnected_event.set()
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", ReconnectHookClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_sleep_interruptible", return_value=None),
+    ):
+        await client.async_start(lambda _doc: None, on_reconnect=on_reconnect)
+        assert reconnect_calls == 0
+
+        created[0].on_disconnect(created[0], None, None, FakeReasonCode(True, "Unspecified error"))
+        await asyncio.wait_for(reconnected_event.wait(), timeout=1.0)
+        assert reconnect_calls == 1
+        await client.async_stop()
