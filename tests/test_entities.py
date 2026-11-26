@@ -57,7 +57,6 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
     # Sensors
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "model")).state == "Venom"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "firmware_version")).state == "1.2.3"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "mac_address")).state == "AA:BB:CC:DD:EE:FF"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "main_temp")).state == "225"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "target_temp")).state == "250"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "heat_intensity")).state == "65"
@@ -89,9 +88,17 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         "shadow_last_updated",
         "last_reported",
     ):
-        reg_entry = registry.async_get(_entity_id_by_key(hass, "sensor", diag_key))
+        eid = _entity_id_by_key(hass, "sensor", diag_key)
+        reg_entry = registry.async_get(eid)
         assert reg_entry is not None
         assert reg_entry.entity_category is EntityCategory.DIAGNOSTIC
+
+    for disabled_key in ("mac_address", "bssid", "update_flag", "trigger_flag"):
+        eid = _entity_id_by_key(hass, "sensor", disabled_key)
+        reg_entry = registry.async_get(eid)
+        assert reg_entry is not None
+        assert reg_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+        assert hass.states.get(eid) is None
 
     # Static limits should not have state_class
     for limit_key in ("target_min", "target_max", "high_temp_limit", "low_temp_limit"):

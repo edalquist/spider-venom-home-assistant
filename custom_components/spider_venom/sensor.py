@@ -97,6 +97,7 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         key="mac_address",
         name="MAC address",
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         value_fn=path_value_fn(("mac",)),
     ),
     SpiderVenomSensorDescription(
@@ -175,18 +176,21 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         key="bssid",
         name="Wi-Fi BSSID",
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         value_fn=path_value_fn(("bssid",)),
     ),
     SpiderVenomSensorDescription(
         key="update_flag",
         name="Update flag",
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         value_fn=path_value_fn(("update",)),
     ),
     SpiderVenomSensorDescription(
         key="trigger_flag",
         name="Trigger flag",
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         value_fn=path_value_fn(("trigger",)),
     ),
     SpiderVenomSensorDescription(
