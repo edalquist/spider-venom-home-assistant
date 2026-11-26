@@ -1,6 +1,11 @@
 set_target_temperature:
   name: Set target temperature
   description: Set the Spider Grills Venom target cooking temperature.
+  target:
+    device:
+      integration: spider_venom
+    entity:
+      integration: spider_venom
   fields:
     temperature:
       name: Temperature
@@ -15,7 +20,7 @@ set_target_temperature:
           unit_of_measurement: "°F"
     thing_name:
       name: Thing name
-      description: AWS IoT thing name. Required only when multiple Venoms are configured.
+      description: AWS IoT thing name. Optional when using a target or a single Venom.
       required: false
       selector:
         text:
