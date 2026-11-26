@@ -13,6 +13,9 @@ from custom_components.spider_venom.api import SpiderVenomApiError
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
     CONF_THING_NAME,
+    DEFAULT_ENDPOINT,
+    DEFAULT_IDENTITY_POOL_ID,
+    DEFAULT_REGION,
     DOMAIN,
     SERVICE_SET_TARGET_TEMPERATURE,
 )
@@ -29,6 +32,28 @@ def test_manifest_metadata() -> None:
     )
     assert manifest["integration_type"] == "device"
     assert "paho-mqtt>=2.1.0" in manifest["requirements"]
+
+
+async def test_setup_falls_back_to_default_aws_settings(hass: HomeAssistant) -> None:
+    """Verify setup succeeds using constant AWS defaults when omitted from entry.data."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_THING_NAME: MOCK_THING_NAME},
+        unique_id=MOCK_THING_NAME,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=SAMPLE_SHADOW,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    client = entry.runtime_data.client
+    assert client._endpoint == DEFAULT_ENDPOINT
+    assert client._identity_pool_id == DEFAULT_IDENTITY_POOL_ID
+    assert client._region == DEFAULT_REGION
 
 
 async def test_setup_unload_and_service_lifecycle(hass: HomeAssistant) -> None:

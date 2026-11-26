@@ -133,6 +133,7 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
     dev_reg = dr.async_get(hass)
     device = dev_reg.async_get_device(identifiers={(DOMAIN, MOCK_THING_NAME)})
     assert device is not None
+    assert device.name == "Patio Venom"
     assert device.manufacturer == "Spider Grills"
     assert device.model == "Venom"
     assert device.sw_version == "1.2.3"

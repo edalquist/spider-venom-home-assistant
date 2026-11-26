@@ -16,6 +16,9 @@ from .const import (
     CONF_IDENTITY_POOL_ID,
     CONF_REGION,
     CONF_THING_NAME,
+    DEFAULT_ENDPOINT,
+    DEFAULT_IDENTITY_POOL_ID,
+    DEFAULT_REGION,
     DOMAIN,
     MAX_TARGET_TEMPERATURE,
     MIN_TARGET_TEMPERATURE,
@@ -39,9 +42,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) 
     """Set up Spider Grills Venom from a config entry."""
     client = SpiderVenomClient(
         session=async_get_clientsession(hass),
-        endpoint=entry.data[CONF_ENDPOINT],
-        identity_pool_id=entry.data[CONF_IDENTITY_POOL_ID],
-        region=entry.data[CONF_REGION],
+        endpoint=entry.data.get(CONF_ENDPOINT, DEFAULT_ENDPOINT),
+        identity_pool_id=entry.data.get(CONF_IDENTITY_POOL_ID, DEFAULT_IDENTITY_POOL_ID),
+        region=entry.data.get(CONF_REGION, DEFAULT_REGION),
         thing_name=entry.data[CONF_THING_NAME],
     )
     coordinator = SpiderVenomDataUpdateCoordinator(hass, client, entry)

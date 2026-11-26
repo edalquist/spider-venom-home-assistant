@@ -27,6 +27,7 @@ class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
         """Initialize the entity."""
         super().__init__(coordinator)
         self._thing_name = entry.data[CONF_THING_NAME]
+        self._device_name = entry.title or "Venom"
         self._attr_unique_id = f"{self._thing_name}_{key}"
 
     @property
@@ -43,7 +44,7 @@ class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
             connections=connections,
             manufacturer="Spider Grills",
             model=str(reported.get("model") or "Venom"),
-            name="Venom",
+            name=self._device_name,
             sw_version=str(reported.get("vers")) if reported.get("vers") else None,
         )
 
