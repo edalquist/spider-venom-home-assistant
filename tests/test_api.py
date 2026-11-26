@@ -311,7 +311,7 @@ async def test_mqtt_auth_failure_invalidates_credentials_and_retries_once() -> N
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-                raise mqtt.WebsocketConnectionError("HTTP 403 Forbidden")
+                raise mqtt.WebsocketConnectionError("WebSocket handshake error, connection not upgraded")
 
         def subscribe(self, topics: Any) -> None:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
@@ -812,6 +812,49 @@ async def test_persistent_mqtt_initial_start_failures_and_auth_retry() -> None:
         assert auth_client._credentials is not None
         assert auth_client._credentials.access_key_id == "AK_RETRY"
         await auth_client.async_stop()
+
+    # Persistent initial WebsocketConnectionError also invalidates credentials and retries once
+    ws_session = MagicMock()
+    ws_session.post.return_value = MockResponse(
+        200,
+        json.dumps(
+            {
+                "Credentials": {
+                    "AccessKeyId": "AK_WS_RETRY",
+                    "SecretKey": "SK_WS_RETRY",
+                    "SessionToken": "ST_WS_RETRY",
+                    "Expiration": future_exp,
+                }
+            }
+        ),
+    )
+    ws_client = _make_client(ws_session)
+    ws_client._identity_id = "us-east-2:id-1"
+    ws_client._credentials = _valid_creds()
+    ws_attempts = 0
+
+    class InitialWsAuthRetryClient(TimeoutClient):
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal ws_attempts
+            ws_attempts += 1
+            if ws_attempts == 1:
+                raise mqtt.WebsocketConnectionError("WebSocket handshake error, connection not upgraded")
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", InitialWsAuthRetryClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        await ws_client.async_start(lambda _doc: None)
+        assert ws_attempts == 2
+        assert ws_client._credentials is not None
+        assert ws_client._credentials.access_key_id == "AK_WS_RETRY"
+        await ws_client.async_stop()
 
 
 @pytest.mark.no_mock_mqtt_push

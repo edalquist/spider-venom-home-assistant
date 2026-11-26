@@ -231,7 +231,8 @@ class SpiderVenomClient:
             err_lower = err_msg.lower()
             err_status = (
                 403
-                if any(
+                if isinstance(err, mqtt.WebsocketConnectionError)
+                or any(
                     marker in err_lower
                     for marker in ("401", "403", "forbidden", "unauthorized")
                 )
