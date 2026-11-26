@@ -205,14 +205,24 @@ class SpiderVenomClient:
 
         runner = self._runner_task
         self._runner_task = None
-        if runner is not None and not runner.done():
-            try:
-                async with asyncio.timeout(5):
-                    await runner
-            except TimeoutError:
-                runner.cancel()
+        if runner is not None:
+            if not runner.done():
+                try:
+                    async with asyncio.timeout(5):
+                        await runner
+                except TimeoutError:
+                    runner.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await runner
+                except Exception:
+                    _LOGGER.exception("Spider Venom MQTT runner stopped with an unexpected error")
+            else:
                 with contextlib.suppress(asyncio.CancelledError):
-                    await runner
+                    if (exc := runner.exception()) is not None:
+                        _LOGGER.exception(
+                            "Spider Venom MQTT runner ended with an unexpected error",
+                            exc_info=exc,
+                        )
 
         self._fail_pending(SpiderVenomApiError("IoT MQTT client stopped"))
         if self._initial_ready_event is not None and not self._initial_ready_event.is_set():
@@ -474,6 +484,17 @@ class SpiderVenomClient:
                     backoff,
                     err,
                 )
+                await self._async_sleep_interruptible(backoff)
+                backoff = min(backoff * 2, _MAX_RECONNECT_BACKOFF)
+            except Exception as err:
+                _LOGGER.exception("Unexpected error in Spider Venom MQTT loop")
+                if not connected_once:
+                    self._initial_error = SpiderVenomApiError(
+                        f"Unexpected IoT MQTT error: {err}"
+                    )
+                    if self._initial_ready_event is not None:
+                        self._initial_ready_event.set()
+                    break
                 await self._async_sleep_interruptible(backoff)
                 backoff = min(backoff * 2, _MAX_RECONNECT_BACKOFF)
             finally:

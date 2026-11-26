@@ -1115,3 +1115,79 @@ async def test_async_stop_wakes_pending_subscribe_and_guards_loop_start() -> Non
     mock_mqtt.connect.assert_called_once()
     mock_mqtt.disconnect.assert_called_once()
     mock_mqtt.loop_start.assert_not_called()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_unexpected_exception_fails_fast_and_recovers_on_reconnect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify unexpected non-API exceptions fail fast on initial connect and recover after reconnect."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+
+    with (
+        patch.object(client, "_presigned_ws_path", side_effect=RuntimeError("bad signer state")),
+        pytest.raises(SpiderVenomApiError, match="Unexpected IoT MQTT error: bad signer state"),
+    ):
+        await asyncio.wait_for(client.async_start(lambda _doc: None), timeout=1.0)
+
+    # Unexpected exception after initial connect logs and reconnects cleanly
+    client2 = _make_client()
+    client2._credentials = _valid_creds()
+    ws_calls = 0
+    recovered_event = asyncio.Event()
+    original_presign = client2._presigned_ws_path
+
+    def flaky_presign(creds: _Credentials) -> str:
+        nonlocal ws_calls
+        ws_calls += 1
+        if ws_calls == 2:
+            raise RuntimeError("transient signing glitch")
+        return original_presign(creds)
+
+    created: list[Any] = []
+
+    class RecoverClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            if len(created) >= 2:
+                recovered_event.set()
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        caplog.at_level(logging.ERROR, logger="custom_components.spider_venom.api"),
+        patch.object(client2, "_presigned_ws_path", side_effect=flaky_presign),
+        patch("custom_components.spider_venom.api.mqtt.Client", RecoverClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client2, "_async_sleep_interruptible", return_value=None),
+    ):
+        await client2.async_start(lambda _doc: None)
+        created[0].on_disconnect(created[0], None, None, FakeReasonCode(True, "Unspecified error"))
+        await asyncio.wait_for(recovered_event.wait(), timeout=1.0)
+        assert ws_calls >= 3
+        assert "Unexpected error in Spider Venom MQTT loop" in caplog.text
+        await client2.async_stop()
