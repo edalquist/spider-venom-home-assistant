@@ -2,7 +2,7 @@
 
 Custom Home Assistant integration for Spider Grills Venom controllers.
 
-This integration connects Home Assistant to a Spider Grills Venom through the cloud-backed AWS IoT Device Shadow used by the mobile app. It can discover devices from a Spider Grills email/password account, read grill state, expose temperature/status entities, and control target temperature plus selected Venom operating toggles.
+This integration connects Home Assistant to a Spider Grills Venom through the cloud-backed AWS IoT Device Shadow used by the mobile app, maintaining a persistent MQTT-over-WebSocket connection for live shadow push updates with automatic reconnect. It can discover devices from a Spider Grills email/password account, read grill state, expose temperature/status entities, and control target temperature plus selected Venom operating toggles.
 
 The integration does not store your Spider Grills password or access token after setup. It stores the selected AWS IoT Thing Name and uses temporary Cognito credentials for ongoing shadow reads/writes.
 

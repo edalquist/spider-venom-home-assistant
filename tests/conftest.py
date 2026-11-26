@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from copy import deepcopy
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -90,3 +92,16 @@ def make_shadow(**overrides: Any) -> dict[str, Any]:
 def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
     """Enable custom integrations in all tests."""
     return
+
+
+@pytest.fixture(autouse=True)
+def mock_mqtt_push(request: pytest.FixtureRequest) -> Generator[None]:
+    """Stub persistent MQTT push lifecycle unless a test opts out."""
+    if "no_mock_mqtt_push" in request.keywords:
+        yield
+        return
+    with (
+        patch("custom_components.spider_venom.api.SpiderVenomClient.async_start", return_value=None),
+        patch("custom_components.spider_venom.api.SpiderVenomClient.async_stop", return_value=None),
+    ):
+        yield

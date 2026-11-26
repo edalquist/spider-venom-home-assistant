@@ -84,6 +84,20 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.client = client
         self._optimistic: dict[tuple[str, ...], _OptimisticEntry] = {}
 
+    async def async_start_push(self) -> None:
+        """Start the persistent MQTT push connection."""
+        await self.client.async_start(self._handle_push_update)
+
+    async def async_stop_push(self) -> None:
+        """Stop the persistent MQTT push connection."""
+        await self.client.async_stop()
+
+    @callback
+    def _handle_push_update(self, data: dict[str, Any]) -> None:
+        """Apply a pushed shadow update from MQTT."""
+        self._reconcile_optimistic(data)
+        self.async_set_updated_data(data)
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from AWS IoT."""
         try:

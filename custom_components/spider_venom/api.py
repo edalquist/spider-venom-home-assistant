@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = ClientTimeout(total=15)
 _MQTT_TIMEOUT = 15
 _MQTT_CONNECT_TIMEOUT = 10.0
+_INITIAL_RECONNECT_BACKOFF = 2.0
+_MAX_RECONNECT_BACKOFF = 60.0
 _MAX_DEBUG_LOG_CHARS = 4096
 _MAX_NON_JSON_LOG_CHARS = 500
 _REDACTED_KEYS = {
@@ -56,6 +59,38 @@ class SpiderVenomApiError(Exception):
 
 class SpiderVenomAuthError(SpiderVenomApiError):
     """Raised when Spider Grills authentication fails."""
+
+
+@dataclass(slots=True)
+class _AttemptState:
+    """Per-connection MQTT handshake and disconnect state."""
+
+    subscribe_event: asyncio.Event
+    disconnect_event: asyncio.Event
+    subscribe_error: tuple[str, int | None] | None = None
+    disconnect_error: tuple[str, int | None] | None = None
+
+    def on_connect(self, mqtt_client: mqtt.Client, topics: list[tuple[str, int]], reason_code: Any) -> None:
+        if reason_code.is_failure:
+            reason_str = str(reason_code)
+            self.subscribe_error = (f"MQTT connect refused: {reason_str}", _auth_status(reason_str))
+            self.subscribe_event.set()
+            return
+        mqtt_client.subscribe(topics)
+
+    def on_subscribe(self, reason_codes: Any) -> None:
+        if any(code.is_failure for code in reason_codes):
+            self.subscribe_error = (
+                f"MQTT subscribe refused: {[str(c) for c in reason_codes]}",
+                None,
+            )
+        self.subscribe_event.set()
+
+    def on_disconnect(self, reason_code: Any) -> None:
+        reason_str = str(reason_code)
+        self.disconnect_error = (f"MQTT disconnected: {reason_str}", _auth_status(reason_str))
+        self.disconnect_event.set()
+        self.subscribe_event.set()
 
 
 @dataclass(slots=True)
@@ -98,6 +133,18 @@ class SpiderVenomClient:
         self._identity_id: str | None = None
         self._credentials_lock = asyncio.Lock()
 
+        # Persistent MQTT push state
+        self._on_shadow_update: Callable[[dict[str, Any]], None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._runner_task: asyncio.Task[None] | None = None
+        self._wake_event: asyncio.Event | None = None
+        self._initial_ready_event: asyncio.Event | None = None
+        self._initial_error: SpiderVenomApiError | None = None
+        self._stopping = False
+        self._ready = False
+        self._mqtt_client: mqtt.Client | None = None
+        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
     async def async_get_shadow(self) -> dict[str, Any]:
         """Fetch the current AWS IoT thing shadow."""
         return await self._async_iot_shadow_request(action="get", payload={})
@@ -117,6 +164,56 @@ class SpiderVenomClient:
         """Fetch a shadow once to validate config."""
         return await self.async_get_shadow()
 
+    async def async_start(self, on_shadow_update: Callable[[dict[str, Any]], None]) -> None:
+        """Start the persistent MQTT-over-WebSocket connection and wait until subscribed."""
+        self._on_shadow_update = on_shadow_update
+        if self._runner_task is not None and not self._runner_task.done():
+            return
+
+        self._loop = asyncio.get_running_loop()
+        self._stopping = False
+        self._wake_event = asyncio.Event()
+        self._initial_ready_event = asyncio.Event()
+        self._initial_error = None
+        self._runner_task = asyncio.create_task(
+            self._async_connection_loop(),
+            name=f"spider_venom_mqtt_{self._thing_name}",
+        )
+
+        try:
+            async with asyncio.timeout(_MQTT_TIMEOUT):
+                await self._initial_ready_event.wait()
+        except TimeoutError as err:
+            await self.async_stop()
+            raise SpiderVenomApiError(
+                f"IoT MQTT connection timed out after {_MQTT_TIMEOUT}s"
+            ) from err
+
+        if self._initial_error is not None:
+            err = self._initial_error
+            await self.async_stop()
+            raise err
+
+    async def async_stop(self) -> None:
+        """Stop the persistent MQTT-over-WebSocket connection cleanly."""
+        self._stopping = True
+        self._ready = False
+        if self._wake_event is not None:
+            self._wake_event.set()
+
+        runner = self._runner_task
+        self._runner_task = None
+        if runner is not None and not runner.done():
+            try:
+                async with asyncio.timeout(5):
+                    await runner
+            except TimeoutError:
+                runner.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await runner
+
+        self._fail_pending(SpiderVenomApiError("IoT MQTT client stopped"))
+
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Return a cached SSL context, creating it lazily off the event loop."""
         if self._ssl_context is None:
@@ -125,14 +222,300 @@ class SpiderVenomClient:
                     self._ssl_context = ssl.create_default_context()
         return self._ssl_context
 
+    def _connect_and_start_client(self, client: mqtt.Client) -> None:
+        """Connect an MQTT client over TLS/WebSocket and start its network loop."""
+        try:
+            client.connect(self._endpoint, 443, keepalive=30)
+        except (OSError, ssl.SSLError) as err:
+            err_msg = str(err)
+            err_lower = err_msg.lower()
+            err_status = (
+                403
+                if any(
+                    marker in err_lower
+                    for marker in ("401", "403", "forbidden", "unauthorized")
+                )
+                else None
+            )
+            raise SpiderVenomApiError(
+                f"IoT MQTT could not connect to {self._endpoint}: {err_msg}",
+                status=err_status,
+            ) from err
+        client.loop_start()
+
+    def _teardown_client(self, client: mqtt.Client) -> None:
+        """Disconnect an MQTT client and join its background network thread."""
+        with contextlib.suppress(Exception):
+            client.disconnect()
+        with contextlib.suppress(Exception):
+            client.loop_stop()
+
+    def _fail_pending(self, err: SpiderVenomApiError) -> None:
+        """Reject any in-flight shadow requests."""
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(err)
+        self._pending.clear()
+
+    def _handle_push_message(self, doc: dict[str, Any]) -> None:
+        """Deliver an incoming shadow/update/documents update to the coordinator."""
+        current = doc.get("current")
+        if not isinstance(current, dict):
+            return
+        shadow_doc = dict(current)
+        if "timestamp" not in shadow_doc and "timestamp" in doc:
+            shadow_doc["timestamp"] = doc["timestamp"]
+        if self._on_shadow_update is not None:
+            self._on_shadow_update(shadow_doc)
+
+    def _resolve_pending(
+        self,
+        action: str,
+        token: str,
+        doc: dict[str, Any],
+        raw: str,
+        is_rejected: bool,
+    ) -> None:
+        """Resolve or reject an awaiting shadow request by clientToken."""
+        future = self._pending.get(token)
+        if future is None or future.done():
+            return
+        if is_rejected:
+            code = doc.get("code")
+            err_status = code if isinstance(code, int) else 400
+            _log_response_body(f"IoT shadow {action}", err_status, raw)
+            future.set_exception(
+                SpiderVenomApiError(
+                    f"Shadow {action} rejected: {code} {doc.get('message')}",
+                    status=err_status,
+                )
+            )
+        else:
+            _log_response_body(f"IoT shadow {action}", 200, raw)
+            future.set_result(doc)
+
+    async def _async_connection_loop(self) -> None:
+        """Maintain a persistent MQTT-over-WebSocket connection with credential rotation."""
+        loop = asyncio.get_running_loop()
+        backoff = _INITIAL_RECONNECT_BACKOFF
+        connected_once = False
+        auth_retried_initial = False
+        shadow_prefix = f"$aws/things/{self._thing_name}/shadow"
+        topics = [
+            (f"{shadow_prefix}/get/accepted", 1),
+            (f"{shadow_prefix}/get/rejected", 1),
+            (f"{shadow_prefix}/update/accepted", 1),
+            (f"{shadow_prefix}/update/rejected", 1),
+            (f"{shadow_prefix}/update/documents", 1),
+        ]
+
+        while not self._stopping:
+            client: mqtt.Client | None = None
+            state = _AttemptState(
+                subscribe_event=asyncio.Event(),
+                disconnect_event=asyncio.Event(),
+            )
+
+            def on_connect(
+                mqtt_client: mqtt.Client,
+                userdata: Any,
+                flags: Any,
+                reason_code: Any,
+                properties: Any = None,
+                *,
+                attempt_state: _AttemptState = state,
+            ) -> None:
+                loop.call_soon_threadsafe(attempt_state.on_connect, mqtt_client, topics, reason_code)
+
+            def on_subscribe(
+                mqtt_client: mqtt.Client,
+                userdata: Any,
+                mid: Any,
+                reason_codes: Any,
+                properties: Any = None,
+                *,
+                attempt_state: _AttemptState = state,
+            ) -> None:
+                loop.call_soon_threadsafe(attempt_state.on_subscribe, reason_codes)
+
+            def on_message(
+                mqtt_client: mqtt.Client,
+                userdata: Any,
+                msg: mqtt.MQTTMessage,
+            ) -> None:
+                raw = msg.payload.decode("utf-8", errors="replace")
+                try:
+                    doc = json.loads(raw)
+                except ValueError:
+                    return
+                if not isinstance(doc, dict):
+                    return
+                if msg.topic.endswith("/update/documents"):
+                    _log_response_body("IoT shadow push", 200, raw)
+                    loop.call_soon_threadsafe(self._handle_push_message, doc)
+                    return
+                req_token = doc.get("clientToken")
+                if not isinstance(req_token, str):
+                    return
+                action = "get" if "/shadow/get/" in msg.topic else "update"
+                is_rejected = msg.topic.endswith("/rejected")
+                loop.call_soon_threadsafe(
+                    self._resolve_pending, action, req_token, doc, raw, is_rejected
+                )
+
+            def on_disconnect(
+                mqtt_client: mqtt.Client,
+                userdata: Any,
+                flags: Any,
+                reason_code: Any,
+                properties: Any = None,
+                *,
+                attempt_state: _AttemptState = state,
+            ) -> None:
+                loop.call_soon_threadsafe(attempt_state.on_disconnect, reason_code)
+
+            try:
+                credentials = await self._async_get_credentials()
+                ws_path = self._presigned_ws_path(credentials)
+                ssl_ctx = await loop.run_in_executor(None, self._get_ssl_context)
+
+                client = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION2,
+                    client_id=str(uuid.uuid4()),
+                    transport="websockets",
+                )
+                client.connect_timeout = _MQTT_CONNECT_TIMEOUT
+                client.ws_set_options(path=ws_path)
+                client.tls_set_context(ssl_ctx)
+                client.on_connect = on_connect
+                client.on_subscribe = on_subscribe
+                client.on_message = on_message
+                client.on_disconnect = on_disconnect
+
+                await loop.run_in_executor(None, self._connect_and_start_client, client)
+
+                async with asyncio.timeout(_MQTT_TIMEOUT):
+                    await state.subscribe_event.wait()
+
+                if state.subscribe_error is not None:
+                    raise SpiderVenomApiError(state.subscribe_error[0], status=state.subscribe_error[1])
+                if state.disconnect_event.is_set():
+                    msg, status = state.disconnect_error or ("MQTT disconnected during connect", None)
+                    raise SpiderVenomApiError(msg, status=status)
+
+                self._mqtt_client = client
+                self._ready = True
+                backoff = _INITIAL_RECONNECT_BACKOFF
+                connected_once = True
+                if self._initial_ready_event is not None:
+                    self._initial_ready_event.set()
+
+                rotation_delay = max(
+                    0.0,
+                    (credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)).total_seconds(),
+                )
+                wake_event = self._wake_event
+                assert wake_event is not None
+                disc_task = asyncio.create_task(state.disconnect_event.wait())
+                wake_task = asyncio.create_task(wake_event.wait())
+                try:
+                    _done, pending_waits = await asyncio.wait(
+                        {disc_task, wake_task},
+                        timeout=rotation_delay,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending_waits:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                except BaseException:
+                    for task in (disc_task, wake_task):
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                    raise
+
+                if self._stopping:
+                    break
+
+                if state.disconnect_event.is_set():
+                    msg, status = state.disconnect_error or ("MQTT disconnected", None)
+                    raise SpiderVenomApiError(msg, status=status)
+
+                # Credential rotation threshold reached; reconnect proactively with fresh credentials.
+                self._credentials = None
+
+            except TimeoutError:
+                err = SpiderVenomApiError(f"IoT MQTT subscribe timed out after {_MQTT_TIMEOUT}s")
+                if not connected_once:
+                    self._initial_error = err
+                    if self._initial_ready_event is not None:
+                        self._initial_ready_event.set()
+                    break
+                _LOGGER.warning("Spider Venom MQTT timed out, reconnecting in %.0fs", backoff)
+                await self._async_sleep_interruptible(backoff)
+                backoff = min(backoff * 2, _MAX_RECONNECT_BACKOFF)
+            except SpiderVenomApiError as err:
+                if err.status in (401, 403):
+                    self._credentials = None
+                if not connected_once:
+                    if err.status in (401, 403) and not auth_retried_initial and not self._stopping:
+                        auth_retried_initial = True
+                        continue
+                    self._initial_error = err
+                    if self._initial_ready_event is not None:
+                        self._initial_ready_event.set()
+                    break
+                _LOGGER.warning(
+                    "Spider Venom MQTT connection lost, reconnecting in %.0fs: %s",
+                    backoff,
+                    err,
+                )
+                await self._async_sleep_interruptible(backoff)
+                backoff = min(backoff * 2, _MAX_RECONNECT_BACKOFF)
+            finally:
+                self._ready = False
+                if self._mqtt_client is client:
+                    self._mqtt_client = None
+                self._fail_pending(SpiderVenomApiError("IoT MQTT connection closed"))
+                if client is not None:
+                    await loop.run_in_executor(None, self._teardown_client, client)
+
+    async def _async_sleep_interruptible(self, delay: float) -> None:
+        """Wait for delay seconds or until async_stop wakes the loop."""
+        if self._wake_event is None or self._stopping:
+            return
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(delay):
+                await self._wake_event.wait()
+
     async def _async_iot_shadow_request(
         self, *, action: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """Call the AWS IoT thing shadow over MQTT-over-WebSocket.
 
-        Since 2026-09-30 the guest Cognito role receives HTTP 403 on the REST shadow
-        API, while MQTT-over-WebSocket remains permitted (matching the mobile app).
+        Uses the persistent connection when active, or opens a short-lived connection
+        for standalone validation calls (such as config flow setup).
         """
+        if self._ready and self._mqtt_client is not None and self._loop is not None:
+            token = uuid.uuid4().hex
+            message = json.dumps({**payload, "clientToken": token}, separators=(",", ":"))
+            topic = f"$aws/things/{self._thing_name}/shadow/{action}"
+            future: asyncio.Future[dict[str, Any]] = self._loop.create_future()
+            self._pending[token] = future
+            try:
+                info = self._mqtt_client.publish(topic, message, qos=1)
+                if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                    raise SpiderVenomApiError(f"IoT shadow {action} publish failed: {info.rc}")
+                async with asyncio.timeout(_MQTT_TIMEOUT):
+                    return await future
+            except TimeoutError as err:
+                raise SpiderVenomApiError(
+                    f"IoT shadow {action} timed out after {_MQTT_TIMEOUT}s"
+                ) from err
+            finally:
+                self._pending.pop(token, None)
+
         loop = asyncio.get_running_loop()
         for attempt in range(2):
             credentials = await self._async_get_credentials()
@@ -177,15 +560,7 @@ class SpiderVenomClient:
         ) -> None:
             if reason_code.is_failure:
                 reason_str = str(reason_code)
-                err_status = (
-                    403
-                    if any(
-                        marker in reason_str.lower()
-                        for marker in ("not authorized", "bad user name or password")
-                    )
-                    else None
-                )
-                finish("error", (f"MQTT connect refused: {reason_str}", err_status))
+                finish("error", (f"MQTT connect refused: {reason_str}", _auth_status(reason_str)))
                 return
             mqtt_client.subscribe([(f"{topic}/accepted", 1), (f"{topic}/rejected", 1)])
 
@@ -234,15 +609,7 @@ class SpiderVenomClient:
             properties: Any = None,
         ) -> None:
             reason_str = str(reason_code)
-            err_status = (
-                403
-                if any(
-                    marker in reason_str.lower()
-                    for marker in ("not authorized", "bad user name or password")
-                )
-                else None
-            )
-            finish("error", (f"MQTT disconnected: {reason_str}", err_status))
+            finish("error", (f"MQTT disconnected: {reason_str}", _auth_status(reason_str)))
 
         # AWS IoT policy only permits a dashed-UUID client id; Cognito identity IDs or
         # undashed hex UUIDs are disconnected before CONNACK.
@@ -259,32 +626,12 @@ class SpiderVenomClient:
         client.on_message = on_message
         client.on_disconnect = on_disconnect
 
-        try:
-            client.connect(self._endpoint, 443, keepalive=30)
-        except (OSError, ssl.SSLError) as err:
-            err_msg = str(err)
-            err_lower = err_msg.lower()
-            err_status = (
-                403
-                if any(
-                    marker in err_lower
-                    for marker in ("401", "403", "forbidden", "unauthorized")
-                )
-                else None
-            )
-            raise SpiderVenomApiError(
-                f"IoT MQTT could not connect to {self._endpoint}: {err_msg}",
-                status=err_status,
-            ) from err
-
-        client.loop_start()
+        self._connect_and_start_client(client)
         try:
             if not done.wait(_MQTT_TIMEOUT):
                 raise SpiderVenomApiError(f"IoT shadow {action} timed out after {_MQTT_TIMEOUT}s")
         finally:
-            with contextlib.suppress(Exception):
-                client.disconnect()
-            client.loop_stop()
+            self._teardown_client(client)
 
         if "error" in result:
             err_msg, err_status = result["error"]
@@ -533,6 +880,14 @@ class SpiderGrillsAccountClient:
             return json.loads(body) if body else {}
         except json.JSONDecodeError as err:
             raise SpiderVenomApiError("Spider Grills API response was not JSON") from err
+
+
+def _auth_status(reason_str: str) -> int | None:
+    """Return 403 if an MQTT disconnect/connect reason indicates an auth failure."""
+    lowered = reason_str.lower()
+    if any(marker in lowered for marker in ("not authorized", "bad user name or password")):
+        return 403
+    return None
 
 
 def _log_response_body(

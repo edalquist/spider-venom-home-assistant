@@ -494,3 +494,202 @@ def test_redacted_body_masks_sensitive_fields_and_truncates() -> None:
 
     assert _redacted_body("<html>err</html>", redact_non_json=True) == "<non-JSON response body omitted>"
     assert _redacted_body(json.dumps({"data": "x" * 5000})).endswith("...<truncated>")
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_push_subscriptions_requests_and_stop() -> None:
+    """Verify persistent MQTT mode subscribes to 5 topics, reuses socket, delivers pushes, and stops."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    created_clients: list[Any] = []
+    subscribed_topics: list[list[str]] = []
+    pushed_docs: list[dict[str, Any]] = []
+
+    class PersistentFakeClient:
+        def __init__(self, api_version: Any, *, client_id: str, transport: str) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            self.connect_timeout: float = 0.0
+            self.disconnected = False
+            self.loop_stopped = False
+            created_clients.append(self)
+
+        def ws_set_options(self, *, path: str) -> None:
+            pass
+
+        def tls_set_context(self, ctx: ssl.SSLContext) -> None:
+            pass
+
+        def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            subscribed_topics.append([t for t, _qos in topics])
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
+            req = json.loads(payload)
+            self.on_message(
+                self,
+                None,
+                FakeMQTTMessage(
+                    f"{topic}/accepted",
+                    json.dumps({"clientToken": req["clientToken"], "state": {"reported": {"mainTemp": 260}}}).encode(),
+                ),
+            )
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+        def loop_stop(self) -> None:
+            self.loop_stopped = True
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", PersistentFakeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        await client.async_start(pushed_docs.append)
+        assert len(created_clients) == 1
+        assert subscribed_topics == [
+            [
+                "$aws/things/venom-123/shadow/get/accepted",
+                "$aws/things/venom-123/shadow/get/rejected",
+                "$aws/things/venom-123/shadow/update/accepted",
+                "$aws/things/venom-123/shadow/update/rejected",
+                "$aws/things/venom-123/shadow/update/documents",
+            ]
+        ]
+
+        # Reuses existing connection for get & update
+        got = await client.async_get_shadow()
+        assert got["state"]["reported"]["mainTemp"] == 260
+        await client.async_set_target_temperature(300)
+        assert len(created_clients) == 1
+
+        # Push update on shadow/update/documents delivers current + timestamp
+        created_clients[0].on_message(
+            created_clients[0],
+            None,
+            FakeMQTTMessage(
+                "$aws/things/venom-123/shadow/update/documents",
+                json.dumps({"current": {"state": {"reported": {"mainTemp": 275}}}, "timestamp": 1700000999}).encode(),
+            ),
+        )
+        await asyncio.sleep(0)
+        assert pushed_docs == [{"state": {"reported": {"mainTemp": 275}}, "timestamp": 1700000999}]
+
+        await client.async_stop()
+        assert client._runner_task is None
+        assert created_clients[0].disconnected
+        assert created_clients[0].loop_stopped
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_rotates_credentials_and_reconnects_on_disconnect() -> None:
+    """Verify proactive rotation before credential expiry and reconnect after unexpected disconnect."""
+    session = MagicMock()
+    soon_exp = (datetime.now(UTC) + timedelta(minutes=5, seconds=0.05)).timestamp()
+    later_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
+    session.post.side_effect = [
+        MockResponse(
+            200,
+            json.dumps(
+                {
+                    "Credentials": {
+                        "AccessKeyId": "AK2",
+                        "SecretKey": "SK2",
+                        "SessionToken": "ST2",
+                        "Expiration": later_exp,
+                    }
+                }
+            ),
+        ),
+        MockResponse(
+            200,
+            json.dumps(
+                {
+                    "Credentials": {
+                        "AccessKeyId": "AK3",
+                        "SecretKey": "SK3",
+                        "SessionToken": "ST3",
+                        "Expiration": later_exp,
+                    }
+                }
+            ),
+        ),
+    ]
+
+    client = _make_client(session)
+    client._identity_id = "us-east-2:id-1"
+    client._credentials = _Credentials(
+        access_key_id="AK1",
+        secret_key="SK1",
+        session_token="ST1",
+        expiration=datetime.fromtimestamp(soon_exp, UTC),
+        identity_id="us-east-2:id-1",
+    )
+    created_clients: list[Any] = []
+    reconnect_event = asyncio.Event()
+
+    class ReconnectFakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created_clients.append(self)
+            if len(created_clients) >= 3:
+                reconnect_event.set()
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", ReconnectFakeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_sleep_interruptible", return_value=None),
+    ):
+        await client.async_start(lambda _doc: None)
+        # Wait for proactive rotation (connect #2)
+        for _ in range(30):
+            if len(created_clients) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(created_clients) >= 2
+        assert client._credentials is not None
+        assert client._credentials.access_key_id == "AK2"
+
+        # Simulate unexpected auth disconnect -> clears credentials and reconnects (#3)
+        created_clients[1].on_disconnect(
+            created_clients[1], None, None, FakeReasonCode(True, "Not authorized")
+        )
+        await asyncio.wait_for(reconnect_event.wait(), timeout=2.0)
+        assert len(created_clients) >= 3
+        assert client._credentials is not None
+        assert client._credentials.access_key_id == "AK3"
+
+        await client.async_stop()

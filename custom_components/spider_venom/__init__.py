@@ -5,9 +5,9 @@ from __future__ import annotations
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import ATTR_DEVICE_ID, ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.const import ATTR_DEVICE_ID, ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, ServiceCall
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -52,9 +52,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) 
         thing_name=entry.data[CONF_THING_NAME],
     )
     coordinator = SpiderVenomDataUpdateCoordinator(hass, client, entry)
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_start_push()
+    except SpiderVenomApiError as err:
+        await coordinator.async_stop_push()
+        raise ConfigEntryNotReady(f"Unable to connect to Spider Venom MQTT: {err}") from err
+
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await coordinator.async_stop_push()
+        raise
+
+    async def _async_stop_on_shutdown(_event: Event) -> None:
+        await coordinator.async_stop_push()
 
     entry.runtime_data = coordinator
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop_on_shutdown))
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -65,6 +79,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry)
     """Unload a config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
+        await entry.runtime_data.async_stop_push()
         entry.runtime_data.async_clear_optimistic_timers()
         other_loaded = [
             loaded_entry

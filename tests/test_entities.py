@@ -272,6 +272,37 @@ async def test_optimistic_reconciliation_service_external_and_expiry(hass: HomeA
         assert not coordinator._optimistic
 
 
+async def test_push_update_updates_entities_and_reconciles_optimistic(hass: HomeAssistant) -> None:
+    """Verify incoming MQTT push updates entities immediately and reconciles optimistic state."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=deepcopy(SAMPLE_SHADOW),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    main_temp_eid = _entity_id_by_key(hass, "sensor", "main_temp")
+    target_eid = _entity_id_by_key(hass, "number", "target_temperature_control")
+    assert hass.states.get(main_temp_eid).state == "225"
+
+    entry.runtime_data.set_optimistic_value(("heat", "t2", "trgt"), 310)
+    assert hass.states.get(target_eid).state == "310"
+
+    pushed = deepcopy(SAMPLE_SHADOW)
+    pushed["state"]["reported"]["mainTemp"] = 242
+    pushed["state"]["reported"]["heat"]["t2"]["trgt"] = 310
+    entry.runtime_data._handle_push_update(pushed)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(main_temp_eid).state == "242"
+    assert hass.states.get(target_eid).state == "310"
+    assert not entry.runtime_data._optimistic
+
+
 async def test_number_entity_rejects_out_of_range_directly(hass: HomeAssistant) -> None:
     """Verify SpiderVenomTargetTemperatureNumber validates min/max bounds."""
     hass.config.units = US_CUSTOMARY_SYSTEM

@@ -27,12 +27,35 @@ from .conftest import MOCK_ENTRY_DATA, MOCK_THING_NAME, SAMPLE_SHADOW, make_shad
 
 
 def test_manifest_metadata() -> None:
-    """Verify manifest.json has integration_type=device and paho-mqtt requirement."""
+    """Verify manifest.json has integration_type=device, cloud_push, and paho-mqtt."""
     manifest = json.loads(
         Path("custom_components/spider_venom/manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["integration_type"] == "device"
+    assert manifest["iot_class"] == "cloud_push"
     assert "paho-mqtt>=2.1.0" in manifest["requirements"]
+
+
+async def test_setup_raises_config_entry_not_ready_when_push_connect_fails(hass: HomeAssistant) -> None:
+    """Verify failed initial MQTT push connect puts entry into SETUP_RETRY and cleans up."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_start",
+            side_effect=SpiderVenomApiError("MQTT refused"),
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_stop",
+            new_callable=AsyncMock,
+        ) as mock_stop,
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state.name == "SETUP_RETRY"
+    mock_stop.assert_called_once()
 
 
 async def test_setup_falls_back_to_default_aws_settings(hass: HomeAssistant) -> None:

@@ -1,6 +1,7 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["no_mock_mqtt_push: disable default stubbing of SpiderVenomClient.async_start/stop"]
 
 [tool.ruff]
 target-version = "py313"
