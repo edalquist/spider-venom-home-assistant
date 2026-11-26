@@ -7,6 +7,7 @@ from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 import hashlib
 import hmac
 import json
@@ -129,6 +130,7 @@ class SpiderVenomClient:
         self._timeout = timeout
         self._ssl_context = ssl_context
         self._ssl_context_lock = threading.Lock()
+        self._client_lifecycle_lock = threading.Lock()
         self._credentials: _Credentials | None = None
         self._identity_id: str | None = None
         self._credentials_lock = asyncio.Lock()
@@ -213,6 +215,8 @@ class SpiderVenomClient:
                     await runner
 
         self._fail_pending(SpiderVenomApiError("IoT MQTT client stopped"))
+        if self._initial_ready_event is not None and not self._initial_ready_event.is_set():
+            self._initial_ready_event.set()
 
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Return a cached SSL context, creating it lazily off the event loop."""
@@ -222,7 +226,9 @@ class SpiderVenomClient:
                     self._ssl_context = ssl.create_default_context()
         return self._ssl_context
 
-    def _connect_and_start_client(self, client: mqtt.Client) -> None:
+    def _connect_and_start_client(
+        self, client: mqtt.Client, *, honor_stopping: bool = False
+    ) -> None:
         """Connect an MQTT client over TLS/WebSocket and start its network loop."""
         try:
             client.connect(self._endpoint, 443, keepalive=30)
@@ -242,11 +248,16 @@ class SpiderVenomClient:
                 f"IoT MQTT could not connect to {self._endpoint}: {err_msg}",
                 status=err_status,
             ) from err
-        client.loop_start()
+        with self._client_lifecycle_lock:
+            if honor_stopping and self._stopping:
+                with contextlib.suppress(Exception):
+                    client.disconnect()
+                return
+            client.loop_start()
 
     def _teardown_client(self, client: mqtt.Client) -> None:
         """Disconnect an MQTT client and join its background network thread."""
-        with contextlib.suppress(Exception):
+        with self._client_lifecycle_lock, contextlib.suppress(Exception):
             client.disconnect()
         with contextlib.suppress(Exception):
             client.loop_stop()
@@ -394,10 +405,19 @@ class SpiderVenomClient:
                 client.on_message = on_message
                 client.on_disconnect = on_disconnect
 
-                await loop.run_in_executor(None, self._connect_and_start_client, client)
+                await loop.run_in_executor(
+                    None,
+                    partial(self._connect_and_start_client, client, honor_stopping=True),
+                )
+                if self._stopping:
+                    break
 
-                async with asyncio.timeout(_MQTT_TIMEOUT):
-                    await state.subscribe_event.wait()
+                wake_event = self._wake_event
+                assert wake_event is not None
+                if not await _async_wait_any((state.subscribe_event, wake_event), _MQTT_TIMEOUT):
+                    raise TimeoutError
+                if self._stopping:
+                    break
 
                 if state.subscribe_error is not None:
                     raise SpiderVenomApiError(state.subscribe_error[0], status=state.subscribe_error[1])
@@ -416,26 +436,7 @@ class SpiderVenomClient:
                     0.0,
                     (credentials.expiration - timedelta(minutes=5) - datetime.now(UTC)).total_seconds(),
                 )
-                wake_event = self._wake_event
-                assert wake_event is not None
-                disc_task = asyncio.create_task(state.disconnect_event.wait())
-                wake_task = asyncio.create_task(wake_event.wait())
-                try:
-                    _done, pending_waits = await asyncio.wait(
-                        {disc_task, wake_task},
-                        timeout=rotation_delay,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in pending_waits:
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-                except BaseException:
-                    for task in (disc_task, wake_task):
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-                    raise
+                await _async_wait_any((state.disconnect_event, wake_event), rotation_delay)
 
                 if self._stopping:
                     break
@@ -891,6 +892,28 @@ def _auth_status(reason_str: str) -> int | None:
     if any(marker in lowered for marker in ("not authorized", "bad user name or password")):
         return 403
     return None
+
+
+async def _async_wait_any(events: tuple[asyncio.Event, ...], timeout: float | None) -> bool:
+    """Wait until any event in events is set, or return False on timeout."""
+    tasks = [asyncio.create_task(event.wait()) for event in events]
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return bool(done)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        raise
 
 
 def _log_response_body(

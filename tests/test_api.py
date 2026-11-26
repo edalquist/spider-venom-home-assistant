@@ -1053,3 +1053,65 @@ async def test_account_client_error_cases() -> None:
     session.request.side_effect = ClientConnectorError(MagicMock(), OSError("refused"))
     with pytest.raises(SpiderVenomApiError, match="could not connect"):
         await account.async_get_devices("tok")
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_async_stop_wakes_pending_subscribe_and_guards_loop_start() -> None:
+    """Verify async_stop() returns promptly during subscribe and skips loop_start if stopping."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    loop_started = False
+    connected_event = asyncio.Event()
+
+    class SlowSubscribeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            self.disconnected = False
+            self.loop_stopped = False
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            connected_event.set()
+
+        def loop_start(self) -> None:
+            nonlocal loop_started
+            loop_started = True
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def subscribe(self, topics: Any) -> None:
+            # Deliberately never fire on_subscribe
+            pass
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+        def loop_stop(self) -> None:
+            self.loop_stopped = True
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", SlowSubscribeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        start_task = asyncio.create_task(client.async_start(lambda _doc: None))
+        await asyncio.wait_for(connected_event.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        # async_stop should wake the subscribe wait promptly (well below _MQTT_TIMEOUT)
+        await asyncio.wait_for(client.async_stop(), timeout=1.0)
+        await asyncio.wait_for(start_task, timeout=1.0)
+        assert loop_started is True
+
+    # Direct check: if _stopping becomes True during connect(), loop_start() is never called
+    client._stopping = True
+    mock_mqtt = MagicMock()
+    client._connect_and_start_client(mock_mqtt, honor_stopping=True)
+    mock_mqtt.connect.assert_called_once()
+    mock_mqtt.disconnect.assert_called_once()
+    mock_mqtt.loop_start.assert_not_called()
