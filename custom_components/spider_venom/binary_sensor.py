@@ -27,22 +27,6 @@ class SpiderVenomBinarySensorDescription(BinarySensorEntityDescription):
 
 BINARY_SENSORS: tuple[SpiderVenomBinarySensorDescription, ...] = (
     SpiderVenomBinarySensorDescription(
-        key="power",
-        name="Power",
-        device_class=BinarySensorDeviceClass.POWER,
-        value_fn=path_value_fn(("pwrOn",)),
-    ),
-    SpiderVenomBinarySensorDescription(
-        key="engaged",
-        name="Engaged",
-        value_fn=path_value_fn(("engaged",)),
-    ),
-    SpiderVenomBinarySensorDescription(
-        key="paused",
-        name="Paused",
-        value_fn=path_value_fn(("paused",)),
-    ),
-    SpiderVenomBinarySensorDescription(
         key="door",
         name="Door",
         device_class=BinarySensorDeviceClass.DOOR,
@@ -58,11 +42,6 @@ BINARY_SENSORS: tuple[SpiderVenomBinarySensorDescription, ...] = (
         key="fahrenheit_mode",
         name="Fahrenheit mode",
         value_fn=path_value_fn(("fah",)),
-    ),
-    SpiderVenomBinarySensorDescription(
-        key="high_temp_enabled",
-        name="High temperature mode",
-        value_fn=path_value_fn(("heat", "t2", "highTemp_enable")),
     ),
     SpiderVenomBinarySensorDescription(
         key="high_temp_notification",

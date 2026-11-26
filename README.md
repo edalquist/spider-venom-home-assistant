@@ -45,9 +45,9 @@ Apple sign-in is not supported yet. Manual Thing Name setup was removed because 
 
 ## Entities
 
-Sensors include current temperature, target temperature, probe temperatures, heat intensity, firmware, Wi-Fi details, signal strength, limits, flags, and errors.
+Sensors include current temperature, probe temperatures, heat intensity, heat start time, firmware, Wi-Fi details, signal strength, limits, flags, errors, and last reported/updated timestamps.
 
-Binary sensors include power, engaged, paused, door, heating, Fahrenheit mode, high temperature mode, and temperature notifications.
+Binary sensors include door, heating, Fahrenheit mode, and temperature notifications.
 
 Controls include main target temperature, Probe 1 and Probe 2 target temperatures, power, engaged, paused, and high temperature mode.
 

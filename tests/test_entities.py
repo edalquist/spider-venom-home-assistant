@@ -58,7 +58,6 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "model")).state == "Venom"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "firmware_version")).state == "1.2.3"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "main_temp")).state == "225"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "target_temp")).state == "250"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "heat_intensity")).state == "65"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "rssi")).state == "-58"
     assert hass.states.get(_entity_id_by_key(hass, "sensor", "errors")).state == "E01,E02"
@@ -107,12 +106,21 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         assert "state_class" not in state.attributes
 
     # Binary sensors
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "power")).state == "on"
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "engaged")).state == "on"
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "paused")).state == "off"
     assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "door")).state == "off"
     assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "heating")).state == "on"
     assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "low_temp_notification")).state == "on"
+
+    # Duplicate read-only entities removed
+    for platform, dup_key in (
+        ("sensor", "target_temp"),
+        ("sensor", "probe_1_target"),
+        ("sensor", "probe_2_target"),
+        ("binary_sensor", "power"),
+        ("binary_sensor", "engaged"),
+        ("binary_sensor", "paused"),
+        ("binary_sensor", "high_temp_enabled"),
+    ):
+        assert registry.async_get_entity_id(platform, DOMAIN, f"{MOCK_THING_NAME}_{dup_key}") is None
 
     # Numbers & switches
     assert hass.states.get(_entity_id_by_key(hass, "number", "target_temperature_control")).state == "250"

@@ -109,14 +109,6 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         value_fn=path_value_fn(("mainTemp",)),
     ),
     SpiderVenomSensorDescription(
-        key="target_temp",
-        name="Target temperature",
-        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("heat", "t2", "trgt")),
-    ),
-    SpiderVenomSensorDescription(
         key="target_min",
         name="Minimum target temperature",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
@@ -224,28 +216,12 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         value_fn=path_value_fn(("probes", "p1", "temp")),
     ),
     SpiderVenomSensorDescription(
-        key="probe_1_target",
-        name="Probe 1 target",
-        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("probes", "p1", "trgt")),
-    ),
-    SpiderVenomSensorDescription(
         key="probe_2_temp",
         name="Probe 2 temperature",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=path_value_fn(("probes", "p2", "temp")),
-    ),
-    SpiderVenomSensorDescription(
-        key="probe_2_target",
-        name="Probe 2 target",
-        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("probes", "p2", "trgt")),
     ),
 )
 
