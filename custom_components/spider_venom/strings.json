@@ -79,5 +79,25 @@
       "paused_control": { "name": "Pause" },
       "high_temp_mode_control": { "name": "High temp mode" }
     }
+  },
+  "services": {
+    "set_target_temperature": {
+      "name": "Set target temperature",
+      "description": "Set the Spider Grills Venom target cooking temperature.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Venom device(s) to update. Optional when a single Venom is configured."
+        },
+        "temperature": {
+          "name": "Temperature",
+          "description": "Target temperature in Fahrenheit."
+        },
+        "thing_name": {
+          "name": "Thing name",
+          "description": "AWS IoT thing name. Optional when using a device or a single Venom."
+        }
+      }
+    }
   }
 }

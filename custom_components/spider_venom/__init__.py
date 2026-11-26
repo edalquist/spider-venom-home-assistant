@@ -5,11 +5,20 @@ from __future__ import annotations
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import ATTR_DEVICE_ID, ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import (
+    ATTR_AREA_ID,
+    ATTR_DEVICE_ID,
+    ATTR_ENTITY_ID,
+    ATTR_FLOOR_ID,
+    ATTR_LABEL_ID,
+    EVENT_HOMEASSISTANT_STOP,
+)
 from homeassistant.core import Event, HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_extract_config_entry_ids
+from homeassistant.helpers.typing import ConfigType
 
 from .api import SpiderVenomApiError, SpiderVenomClient
 from .const import (
@@ -29,17 +38,38 @@ from .const import (
 )
 from .coordinator import SpiderVenomConfigEntry, SpiderVenomDataUpdateCoordinator
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+TARGET_ATTRS = (
+    ATTR_DEVICE_ID,
+    ATTR_ENTITY_ID,
+    ATTR_AREA_ID,
+    ATTR_FLOOR_ID,
+    ATTR_LABEL_ID,
+)
+
 SET_TARGET_TEMPERATURE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TEMPERATURE): vol.All(
-            vol.Coerce(int),
+            vol.Coerce(float),
+            round,
+            int,
             vol.Range(min=MIN_TARGET_TEMPERATURE, max=MAX_TARGET_TEMPERATURE),
         ),
         vol.Optional(CONF_THING_NAME): str,
         vol.Optional(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [str]),
         vol.Optional(ATTR_ENTITY_ID): vol.All(cv.ensure_list, [str]),
+        vol.Optional(ATTR_AREA_ID): vol.All(cv.ensure_list, [str]),
+        vol.Optional(ATTR_FLOOR_ID): vol.All(cv.ensure_list, [str]),
+        vol.Optional(ATTR_LABEL_ID): vol.All(cv.ensure_list, [str]),
     }
 )
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up Spider Grills Venom domain services."""
+    _async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) -> bool:
@@ -85,14 +115,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry)
     if unloaded:
         await entry.runtime_data.async_stop_push()
         entry.runtime_data.async_clear_optimistic_timers()
-        other_loaded = [
-            loaded_entry
-            for loaded_entry in hass.config_entries.async_entries(DOMAIN)
-            if loaded_entry.entry_id != entry.entry_id
-            and loaded_entry.state is ConfigEntryState.LOADED
-        ]
-        if not other_loaded:
-            hass.services.async_remove(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
     return unloaded
 
 
@@ -113,24 +135,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if entry.state is ConfigEntryState.LOADED
         ]
         thing_name = call.data.get(CONF_THING_NAME)
-        device_ids: list[str] = call.data.get(ATTR_DEVICE_ID, [])
-        entity_ids: list[str] = call.data.get(ATTR_ENTITY_ID, [])
+        has_target = any(key in call.data for key in TARGET_ATTRS)
         temperature = call.data[ATTR_TEMPERATURE]
 
         if not entries:
             raise HomeAssistantError("No Spider Grills Venom devices are configured")
 
-        if device_ids or entity_ids:
-            matched_entry_ids: set[str] = set()
-            dev_reg = dr.async_get(hass)
-            for device_id in device_ids:
-                if (device := dev_reg.async_get(device_id)) is not None:
-                    matched_entry_ids.update(device.config_entries)
-            ent_reg = er.async_get(hass)
-            for entity_id in entity_ids:
-                if (entity := ent_reg.async_get(entity_id)) is not None and entity.config_entry_id:
-                    matched_entry_ids.add(entity.config_entry_id)
-
+        if has_target:
+            matched_entry_ids = await async_extract_config_entry_ids(call)
             target_entries = [entry for entry in entries if entry.entry_id in matched_entry_ids]
             if not target_entries:
                 raise HomeAssistantError("No matching Spider Grills Venom devices found for target")
@@ -149,7 +161,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         elif len(entries) == 1:
             target_entries = [entries[0]]
         else:
-            raise HomeAssistantError("thing_name is required when multiple Venoms are configured")
+            raise HomeAssistantError(
+                "Specify device_id, entity_id, or thing_name when multiple Venoms are configured"
+            )
 
         for target_entry in target_entries:
             coordinator: SpiderVenomDataUpdateCoordinator = target_entry.runtime_data

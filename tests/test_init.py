@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 import yaml
 
+from custom_components.spider_venom import async_setup
 from custom_components.spider_venom.api import SpiderVenomApiError
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
@@ -24,7 +25,12 @@ from custom_components.spider_venom.const import (
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er, service
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    service,
+)
 
 from .conftest import MOCK_ENTRY_DATA, MOCK_THING_NAME, SAMPLE_SHADOW, make_shadow
 
@@ -97,7 +103,10 @@ async def test_setup_falls_back_to_default_aws_settings(hass: HomeAssistant) -> 
 
 
 async def test_setup_unload_and_service_lifecycle(hass: HomeAssistant) -> None:
-    """Verify service is registered on setup and removed when last entry unloads."""
+    """Verify service is registered in async_setup and persists across entry unload/reload."""
+    assert await async_setup(hass, {})
+    assert hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
+
     entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
     entry.add_to_hass(hass)
 
@@ -114,7 +123,7 @@ async def test_setup_unload_and_service_lifecycle(hass: HomeAssistant) -> None:
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert not hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
+    assert hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE)
 
     entry2 = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id="venom-empty-check")
     entry2.add_to_hass(hass)
@@ -389,3 +398,59 @@ async def test_setup_stops_push_when_platform_forward_fails(hass: HomeAssistant)
 
     assert entry.state.name == "SETUP_ERROR"
     mock_stop_push.assert_awaited_once()
+
+
+async def test_service_rounds_float_supports_area_target_and_has_translations(
+    hass: HomeAssistant,
+) -> None:
+    """Verify float rounding, area_id targeting, and service translations."""
+    strings = json.loads(Path("custom_components/spider_venom/strings.json").read_text(encoding="utf-8"))
+    en = json.loads(Path("custom_components/spider_venom/translations/en.json").read_text(encoding="utf-8"))
+    assert strings["services"] == en["services"]
+    assert SERVICE_SET_TARGET_TEMPERATURE in en["services"]
+
+    entry1 = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry2 = MockConfigEntry(
+        domain=DOMAIN,
+        data={**MOCK_ENTRY_DATA, CONF_THING_NAME: "venom-test-002"},
+        unique_id="venom-test-002",
+    )
+    entry1.add_to_hass(hass)
+    entry2.add_to_hass(hass)
+
+    async def fake_get_shadow(client_self: object) -> dict[str, object]:
+        if getattr(client_self, "_thing_name", "") == "venom-test-002":
+            return make_shadow(mac="11:22:33:44:55:66")
+        return make_shadow()
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            autospec=True,
+            side_effect=fake_get_shadow,
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_set_target_temperature",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as mock_set_temp,
+    ):
+        assert await hass.config_entries.async_setup(entry1.entry_id)
+        await hass.async_block_till_done()
+
+        area_reg = ar.async_get(hass)
+        patio = area_reg.async_get_or_create("Patio")
+        dev_reg = dr.async_get(hass)
+        device2 = dev_reg.async_get_device(identifiers={(DOMAIN, "venom-test-002")})
+        assert device2 is not None
+        dev_reg.async_update_device(device2.id, area_id=patio.id)
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_TARGET_TEMPERATURE,
+            {ATTR_TEMPERATURE: 300.6},
+            target={"area_id": patio.id},
+            blocking=True,
+        )
+        mock_set_temp.assert_called_once_with(301)
+        assert entry2.runtime_data.get_optimistic_value(("heat", "t2", "trgt")) == (True, 301)
