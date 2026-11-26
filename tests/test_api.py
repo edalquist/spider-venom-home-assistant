@@ -1548,3 +1548,68 @@ async def test_mqtt_subscribe_publish_rc_errors_and_safe_call_soon_threadsafe() 
     closed_loop = MagicMock(spec=asyncio.AbstractEventLoop)
     closed_loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
     _safe_call_soon_threadsafe(closed_loop, lambda: None)
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_endpoint_normalization_and_concurrent_async_start() -> None:
+    """Verify endpoint normalization lowercases/strips and concurrent async_start awaits readiness."""
+    client = SpiderVenomClient(
+        session=MagicMock(),
+        endpoint=" HTTPS://EXAMPLE-ATS.IOT.US-EAST-2.AMAZONAWS.COM/ ",
+        identity_pool_id="us-east-2:11111111-2222-3333-4444-555555555555",
+        region="us-east-2",
+        thing_name="venom-123",
+    )
+    assert client._endpoint == "example-ats.iot.us-east-2.amazonaws.com"
+    client._credentials = _valid_creds()
+    sub_ready = asyncio.Event()
+    created: list[Any] = []
+
+    class ConcurrentStartClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    async def complete_subscribe() -> None:
+        while not created:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.02)
+        created[0].on_subscribe(created[0], None, 1, [FakeReasonCode(False)] * 5)
+        sub_ready.set()
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", ConcurrentStartClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        t1 = asyncio.create_task(client.async_start(lambda _doc: None))
+        await asyncio.sleep(0.01)
+        t2 = asyncio.create_task(client.async_start(lambda _doc: None))
+        completer = asyncio.create_task(complete_subscribe())
+        await asyncio.wait_for(asyncio.gather(t1, t2, completer), timeout=2.0)
+        assert len(created) == 1
+        assert sub_ready.is_set()
+        await client.async_stop()

@@ -138,7 +138,13 @@ class SpiderVenomClient:
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._session = session
-        self._endpoint = endpoint.removeprefix("https://").removeprefix("http://").strip("/")
+        self._endpoint = (
+            endpoint.strip()
+            .lower()
+            .removeprefix("https://")
+            .removeprefix("http://")
+            .strip("/")
+        )
         self._identity_pool_id = identity_pool_id
         self._region = region
         self._thing_name = thing_name
@@ -183,6 +189,23 @@ class SpiderVenomClient:
         """Fetch a shadow once to validate config."""
         return await self.async_get_shadow()
 
+    async def _async_await_initial_ready(self) -> None:
+        """Wait for initial MQTT startup to complete or raise any startup error."""
+        if self._initial_ready_event is not None and not self._initial_ready_event.is_set():
+            try:
+                async with asyncio.timeout(_MQTT_TIMEOUT):
+                    await self._initial_ready_event.wait()
+            except TimeoutError as err:
+                await self.async_stop()
+                raise SpiderVenomApiError(
+                    f"IoT MQTT connection timed out after {_MQTT_TIMEOUT}s"
+                ) from err
+
+        if self._initial_error is not None:
+            initial_err = self._initial_error
+            await self.async_stop()
+            raise initial_err
+
     async def async_start(
         self,
         on_shadow_update: Callable[[dict[str, Any]], None],
@@ -192,6 +215,7 @@ class SpiderVenomClient:
         self._on_shadow_update = on_shadow_update
         self._on_reconnect = on_reconnect
         if self._runner_task is not None and not self._runner_task.done():
+            await self._async_await_initial_ready()
             return
 
         self._loop = asyncio.get_running_loop()
@@ -205,19 +229,7 @@ class SpiderVenomClient:
             name=f"spider_venom_mqtt_{self._thing_name}",
         )
 
-        try:
-            async with asyncio.timeout(_MQTT_TIMEOUT):
-                await self._initial_ready_event.wait()
-        except TimeoutError as err:
-            await self.async_stop()
-            raise SpiderVenomApiError(
-                f"IoT MQTT connection timed out after {_MQTT_TIMEOUT}s"
-            ) from err
-
-        if self._initial_error is not None:
-            err = self._initial_error
-            await self.async_stop()
-            raise err
+        await self._async_await_initial_ready()
 
     async def async_stop(self) -> None:
         """Stop the persistent MQTT-over-WebSocket connection cleanly."""

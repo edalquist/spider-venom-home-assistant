@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.spider_venom.api import SpiderVenomApiError
+from custom_components.spider_venom.api import SpiderVenomApiError, SpiderVenomAuthError
 from custom_components.spider_venom.config_flow import _device_label, _device_thing_name
 from custom_components.spider_venom.const import (
     CONF_ENDPOINT,
@@ -91,7 +91,7 @@ async def test_account_step_errors_and_suggested_values(hass: HomeAssistant) -> 
 
     with patch(
         "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_login",
-        side_effect=SpiderVenomApiError("Spider Grills API returned HTTP 401", status=401),
+        side_effect=SpiderVenomAuthError("Spider Grills API returned HTTP 401", status=401),
     ):
         auth_err = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -168,23 +168,45 @@ async def test_duplicate_device_aborts_before_test_connection(hass: HomeAssistan
             "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_get_devices",
             return_value=[{"thingName": "venom-dup", "deviceName": "Grill"}],
         ),
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderVenomClient.async_test_connection",
+        ) as mock_test,
     ):
-        step2 = await hass.config_entries.flow.async_configure(
+        aborted = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {CONF_EMAIL: "u@example.com", CONF_PASSWORD: "pw", CONF_SCAN_INTERVAL: 30},
-        )
-
-    with patch(
-        "custom_components.spider_venom.config_flow.SpiderVenomClient.async_test_connection",
-    ) as mock_test:
-        aborted = await hass.config_entries.flow.async_configure(
-            step2["flow_id"],
-            {CONF_THING_NAME: "venom-dup"},
         )
 
     assert aborted["type"] is FlowResultType.ABORT
     assert aborted["reason"] == "already_configured"
     mock_test.assert_not_called()
+
+    # When mix of configured + unconfigured devices exist, only unconfigured ones appear in select_device
+    result_mix = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with (
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_login",
+            return_value="tok",
+        ),
+        patch(
+            "custom_components.spider_venom.config_flow.SpiderGrillsAccountClient.async_get_devices",
+            return_value=[
+                {"thingName": "venom-dup", "deviceName": "Grill"},
+                {"thingName": "venom-new", "deviceName": "Smoker"},
+            ],
+        ),
+    ):
+        mix_step2 = await hass.config_entries.flow.async_configure(
+            result_mix["flow_id"],
+            {CONF_EMAIL: "u@example.com", CONF_PASSWORD: "pw", CONF_SCAN_INTERVAL: 30},
+        )
+    assert mix_step2["type"] is FlowResultType.FORM
+    assert mix_step2["step_id"] == "select_device"
+    assert mix_step2["data_schema"] is not None
+    options = mix_step2["data_schema"].schema[CONF_THING_NAME].container
+    assert list(options.keys()) == ["venom-new"]
 
 
 async def test_select_device_shadow_validation_error(hass: HomeAssistant) -> None:
@@ -250,14 +272,16 @@ async def test_options_flow_updates_scan_interval_and_reloads(hass: HomeAssistan
 
 
 def test_device_helpers() -> None:
-    """Verify fallback keys in _device_thing_name and _device_label."""
-    assert _device_thing_name({"thingName": "t1"}) == "t1"
+    """Verify fallback keys and stripping in _device_thing_name and _device_label."""
+    assert _device_thing_name({"thingName": " t1 "}) == "t1"
+    assert _device_thing_name({"thingName": "   "}) is None
     assert _device_thing_name({"thing_name": "t2"}) == "t2"
     assert _device_thing_name({"externalId": "t3"}) == "t3"
     assert _device_thing_name({"deviceId": "t4"}) == "t4"
     assert _device_thing_name({}) is None
 
-    assert _device_label({"deviceName": "Grill"}, "t1") == "Grill (t1)"
+    assert _device_label({"deviceName": " Grill "}, "t1") == "Grill (t1)"
+    assert _device_label({"deviceName": "   "}, "t1") == "t1"
     assert _device_label({"name": "Kettle"}, "t1") == "Kettle (t1)"
     assert _device_label({"model": "Venom"}, "t1") == "Venom (t1)"
     assert _device_label({}, "t1") == "t1"

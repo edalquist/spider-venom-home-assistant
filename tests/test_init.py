@@ -37,13 +37,25 @@ from .conftest import MOCK_ENTRY_DATA, MOCK_THING_NAME, SAMPLE_SHADOW, make_shad
 
 
 def test_manifest_metadata() -> None:
-    """Verify manifest.json has integration_type=device, cloud_push, and paho-mqtt."""
+    """Verify manifest.json has integration_type=device, cloud_push, and pinned paho-mqtt."""
     manifest = json.loads(
         Path("custom_components/spider_venom/manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["integration_type"] == "device"
     assert manifest["iot_class"] == "cloud_push"
-    assert "paho-mqtt>=2.1.0" in manifest["requirements"]
+    assert "paho-mqtt>=2.1.0,<3.0.0" in manifest["requirements"]
+
+
+def test_icons_json_valid() -> None:
+    """Verify icons.json parses cleanly and covers all entities and service."""
+    icons = json.loads(
+        Path("custom_components/spider_venom/icons.json").read_text(encoding="utf-8")
+    )
+    assert SERVICE_SET_TARGET_TEMPERATURE in icons["services"]
+    for platform in ("sensor", "binary_sensor", "number", "switch"):
+        assert platform in icons["entity"]
+        for icon_def in icons["entity"][platform].values():
+            assert icon_def["default"].startswith("mdi:")
 
 
 def test_services_yaml_schema() -> None:

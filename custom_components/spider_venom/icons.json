@@ -1,0 +1,49 @@
+{
+  "entity": {
+    "sensor": {
+      "model": { "default": "mdi:grill" },
+      "firmware_version": { "default": "mdi:chip" },
+      "mac_address": { "default": "mdi:network" },
+      "main_temp": { "default": "mdi:thermometer" },
+      "target_min": { "default": "mdi:thermometer-low" },
+      "target_max": { "default": "mdi:thermometer-high" },
+      "heat_intensity": { "default": "mdi:fan" },
+      "heat_start_time": { "default": "mdi:clock-start" },
+      "high_temp_limit": { "default": "mdi:thermometer-alert" },
+      "low_temp_limit": { "default": "mdi:thermometer-alert" },
+      "rssi": { "default": "mdi:wifi" },
+      "ssid": { "default": "mdi:wifi-settings" },
+      "bssid": { "default": "mdi:access-point" },
+      "update_flag": { "default": "mdi:update" },
+      "trigger_flag": { "default": "mdi:flag" },
+      "errors": { "default": "mdi:alert-circle" },
+      "shadow_last_updated": { "default": "mdi:cloud-clock" },
+      "last_reported": { "default": "mdi:clock-check" },
+      "probe_1_temp": { "default": "mdi:thermometer-probe" },
+      "probe_2_temp": { "default": "mdi:thermometer-probe" }
+    },
+    "binary_sensor": {
+      "door": { "default": "mdi:door" },
+      "heating": { "default": "mdi:fire" },
+      "fahrenheit_mode": { "default": "mdi:temperature-fahrenheit" },
+      "high_temp_notification": { "default": "mdi:thermometer-alert" },
+      "low_temp_notification": { "default": "mdi:thermometer-alert" }
+    },
+    "number": {
+      "target_temperature_control": { "default": "mdi:thermometer" },
+      "probe_1_target_temperature_control": { "default": "mdi:thermometer-probe" },
+      "probe_2_target_temperature_control": { "default": "mdi:thermometer-probe" }
+    },
+    "switch": {
+      "power_control": { "default": "mdi:power" },
+      "engaged_control": { "default": "mdi:thermostat" },
+      "paused_control": { "default": "mdi:pause-circle" },
+      "high_temp_mode_control": { "default": "mdi:fire-alert" }
+    }
+  },
+  "services": {
+    "set_target_temperature": {
+      "service": "mdi:thermometer"
+    }
+  }
+}

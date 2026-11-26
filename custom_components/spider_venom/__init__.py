@@ -19,6 +19,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service import async_extract_config_entry_ids
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util.ssl import get_default_context
 
 from .api import SpiderVenomApiError, SpiderVenomClient
 from .const import (
@@ -80,6 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) 
         identity_pool_id=entry.data.get(CONF_IDENTITY_POOL_ID, DEFAULT_IDENTITY_POOL_ID),
         region=entry.data.get(CONF_REGION, DEFAULT_REGION),
         thing_name=entry.data[CONF_THING_NAME],
+        ssl_context=get_default_context(),
     )
     coordinator = SpiderVenomDataUpdateCoordinator(hass, client, entry)
     try:
