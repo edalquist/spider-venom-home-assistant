@@ -693,3 +693,304 @@ async def test_persistent_mqtt_rotates_credentials_and_reconnects_on_disconnect(
         assert client._credentials.access_key_id == "AK3"
 
         await client.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_initial_start_failures_and_auth_retry() -> None:
+    """Verify persistent async_start handles timeouts, connect/subscribe refusals, and auth retry."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+
+    class TimeoutClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def loop_start(self) -> None:
+            pass
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api._MQTT_TIMEOUT", 0.05),
+        patch("custom_components.spider_venom.api.mqtt.Client", TimeoutClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="timed out"),
+    ):
+        await client.async_start(lambda _doc: None)
+
+    class ConnectRefusedClient(TimeoutClient):
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(True, "Server unavailable"))
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", ConnectRefusedClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT connect refused"),
+    ):
+        await client.async_start(lambda _doc: None)
+
+    class SubscribeRefusedClient(TimeoutClient):
+        def subscribe(self, topics: Any) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(True, "Unspecified error")])
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", SubscribeRefusedClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT subscribe refused"),
+    ):
+        await client.async_start(lambda _doc: None)
+
+    class HandshakeDisconnectClient(TimeoutClient):
+        def loop_start(self) -> None:
+            self.on_disconnect(self, None, None, FakeReasonCode(True, "Unspecified error"))
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", HandshakeDisconnectClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT disconnected"),
+    ):
+        await client.async_start(lambda _doc: None)
+
+    # Initial auth failure (Not authorized CONNACK) invalidates credentials and retries once
+    session = MagicMock()
+    future_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
+    session.post.return_value = MockResponse(
+        200,
+        json.dumps(
+            {
+                "Credentials": {
+                    "AccessKeyId": "AK_RETRY",
+                    "SecretKey": "SK_RETRY",
+                    "SessionToken": "ST_RETRY",
+                    "Expiration": future_exp,
+                }
+            }
+        ),
+    )
+    auth_client = _make_client(session)
+    auth_client._identity_id = "us-east-2:id-1"
+    auth_client._credentials = _valid_creds()
+    attempts = 0
+
+    class InitialAuthRetryClient(TimeoutClient):
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def loop_start(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                self.on_connect(self, None, None, FakeReasonCode(True, "Not authorized"))
+            else:
+                self.on_connect(self, None, None, FakeReasonCode(False))
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", InitialAuthRetryClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+    ):
+        await auth_client.async_start(lambda _doc: None)
+        assert attempts == 2
+        assert auth_client._credentials is not None
+        assert auth_client._credentials.access_key_id == "AK_RETRY"
+        await auth_client.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_persistent_mqtt_request_errors_malformed_messages_and_disconnect() -> None:
+    """Verify persistent request timeouts, publish failures, rejections, malformed payloads, and fail_pending."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+    pushed_docs: list[dict[str, Any]] = []
+    publish_mode = "ok"
+    created: list[Any] = []
+
+    class PersistentErrorClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+            created.append(self)
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
+            if publish_mode == "rc_error":
+                return MagicMock(rc=mqtt.MQTT_ERR_NO_CONN)
+            if publish_mode == "rejected":
+                token = json.loads(payload)["clientToken"]
+                self.on_message(
+                    self,
+                    None,
+                    FakeMQTTMessage(
+                        f"{topic}/rejected",
+                        json.dumps({"clientToken": token, "code": 409, "message": "Version conflict"}).encode(),
+                    ),
+                )
+            elif publish_mode == "disconnect":
+                self.on_disconnect(self, None, None, FakeReasonCode(True, "Unspecified error"))
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", PersistentErrorClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_sleep_interruptible", return_value=None),
+    ):
+        await client.async_start(pushed_docs.append)
+        mqtt_c = created[0]
+
+        # Malformed/non-dict payloads and missing clientToken are safely ignored
+        for topic, raw_bytes in (
+            ("$aws/things/venom-123/shadow/update/documents", b"{bad-json"),
+            ("$aws/things/venom-123/shadow/update/documents", b"[]"),
+            ("$aws/things/venom-123/shadow/update/documents", b'{"current": "not-a-dict"}'),
+            ("$aws/things/venom-123/shadow/get/accepted", b'{"state": {}}'),
+        ):
+            mqtt_c.on_message(mqtt_c, None, FakeMQTTMessage(topic, raw_bytes))
+        await asyncio.sleep(0)
+        assert pushed_docs == []
+
+        # Non-zero publish return code
+        publish_mode = "rc_error"
+        with pytest.raises(SpiderVenomApiError, match="publish failed"):
+            await client.async_get_shadow()
+
+        # /rejected shadow response
+        publish_mode = "rejected"
+        with pytest.raises(SpiderVenomApiError, match="Shadow update rejected: 409 Version conflict") as rej_exc:
+            await client.async_set_target_temperature(280)
+        assert rej_exc.value.status == 409
+
+        # Timeout on unanswered persistent request
+        publish_mode = "timeout"
+        with (
+            patch("custom_components.spider_venom.api._MQTT_TIMEOUT", 0.02),
+            pytest.raises(SpiderVenomApiError, match="timed out"),
+        ):
+            await client.async_get_shadow()
+
+        # Mid-flight disconnect triggers _fail_pending
+        publish_mode = "disconnect"
+        with pytest.raises(SpiderVenomApiError, match="connection closed"):
+            await client.async_get_shadow()
+
+        await client.async_stop()
+
+
+async def test_cognito_edge_cases_and_identity_recovery() -> None:
+    """Verify Cognito clears stale identity_id on 400/401/403 and validates response shapes."""
+    session = MagicMock()
+    future_exp = (datetime.now(UTC) + timedelta(hours=1)).timestamp()
+    post_calls: list[str] = []
+    cred_attempts = 0
+
+    def fake_post(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: ClientTimeout) -> MockResponse:
+        nonlocal cred_attempts
+        target = headers["X-Amz-Target"].split(".")[-1]
+        post_calls.append(target)
+        if target == "GetId":
+            return MockResponse(200, f'{{"IdentityId":"us-east-2:fresh-{len(post_calls)}"}}')
+        cred_attempts += 1
+        if cred_attempts == 1:
+            return MockResponse(400, '{"__type":"ResourceNotFoundException","message":"Identity not found"}')
+        return MockResponse(
+            200,
+            f'{{"Credentials":{{"AccessKeyId":"AK_F","SecretKey":"SK_F","SessionToken":"ST_F","Expiration":{future_exp}}}}}',
+        )
+
+    session.post.side_effect = fake_post
+    client = _make_client(session)
+    client._identity_id = "us-east-2:stale-id"
+
+    with pytest.raises(SpiderVenomApiError, match="ResourceNotFoundException"):
+        await client._async_get_credentials()
+    assert client._identity_id is None
+
+    creds = await client._async_get_credentials()
+    assert creds.access_key_id == "AK_F"
+    assert post_calls == ["GetCredentialsForIdentity", "GetId", "GetCredentialsForIdentity"]
+
+    # Missing IdentityId / Credentials / incomplete fields / non-JSON 200
+    session.post.side_effect = None
+    client._identity_id = None
+    client._credentials = None
+    session.post.return_value = MockResponse(200, "{}")
+    with pytest.raises(SpiderVenomApiError, match="did not include IdentityId"):
+        await client._async_get_credentials()
+
+    client._identity_id = "us-east-2:ok"
+    session.post.return_value = MockResponse(200, "{}")
+    with pytest.raises(SpiderVenomApiError, match="did not include credentials"):
+        await client._async_get_credentials()
+
+    session.post.return_value = MockResponse(200, '{"Credentials":{"AccessKeyId":"A"}}')
+    with pytest.raises(SpiderVenomApiError, match="credentials response was incomplete"):
+        await client._async_get_credentials()
+
+    session.post.return_value = MockResponse(200, "not-json")
+    with pytest.raises(SpiderVenomApiError, match="was not JSON"):
+        await client._async_cognito_post("GetId", {"IdentityPoolId": "pool"})
+
+
+async def test_account_client_error_cases() -> None:
+    """Verify SpiderGrillsAccountClient handles 403, missing token, network errors, and non-JSON."""
+    session = MagicMock()
+    account = SpiderGrillsAccountClient(session=session)
+
+    session.request.return_value = MockResponse(200, json.dumps({"accessToken": ""}))
+    with pytest.raises(SpiderVenomApiError, match="did not include an access token"):
+        await account.async_login(email="user@example.com", password="pw")
+
+    session.request.return_value = MockResponse(403, "Forbidden")
+    with pytest.raises(SpiderVenomAuthError, match="HTTP 403"):
+        await account.async_login(email="user@example.com", password="pw")
+
+    session.request.return_value = MockResponse(200, "not-json")
+    with pytest.raises(SpiderVenomApiError, match="was not JSON"):
+        await account.async_login(email="user@example.com", password="pw")
+
+    session.request.side_effect = TimeoutError("timed out")
+    with pytest.raises(SpiderVenomApiError, match="timed out"):
+        await account.async_login(email="user@example.com", password="pw")
+
+    session.request.side_effect = ClientConnectorError(MagicMock(), OSError("refused"))
+    with pytest.raises(SpiderVenomApiError, match="could not connect"):
+        await account.async_get_devices("tok")
