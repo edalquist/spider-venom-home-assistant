@@ -36,7 +36,7 @@ class SpiderVenomNumberDescription(NumberEntityDescription):
 NUMBERS: tuple[SpiderVenomNumberDescription, ...] = (
     SpiderVenomNumberDescription(
         key="target_temperature_control",
-        name="Target temperature control",
+        translation_key="target_temperature_control",
         device_class=NumberDeviceClass.TEMPERATURE,
         native_min_value=MIN_TARGET_TEMPERATURE,
         native_max_value=MAX_TARGET_TEMPERATURE,
@@ -47,7 +47,7 @@ NUMBERS: tuple[SpiderVenomNumberDescription, ...] = (
     ),
     SpiderVenomNumberDescription(
         key="probe_1_target_temperature_control",
-        name="Probe 1 target temperature control",
+        translation_key="probe_1_target_temperature_control",
         device_class=NumberDeviceClass.TEMPERATURE,
         native_min_value=0,
         native_max_value=MAX_TARGET_TEMPERATURE,
@@ -58,7 +58,7 @@ NUMBERS: tuple[SpiderVenomNumberDescription, ...] = (
     ),
     SpiderVenomNumberDescription(
         key="probe_2_target_temperature_control",
-        name="Probe 2 target temperature control",
+        translation_key="probe_2_target_temperature_control",
         device_class=NumberDeviceClass.TEMPERATURE,
         native_min_value=0,
         native_max_value=MAX_TARGET_TEMPERATURE,
@@ -116,12 +116,12 @@ class SpiderVenomTargetTemperatureNumber(SpiderVenomEntity, NumberEntity):
         temperature = int(round(value))
         minimum = self.entity_description.native_min_value
         maximum = self.entity_description.native_max_value
+        label = self.name if isinstance(self.name, str) else self.entity_description.key
         if (minimum is not None and temperature < minimum) or (
             maximum is not None and temperature > maximum
         ):
             raise HomeAssistantError(
-                f"{self.entity_description.name} must be between "
-                f"{minimum:g} and {maximum:g} F"
+                f"{label} must be between {minimum:g} and {maximum:g} F"
             )
 
         try:
@@ -129,9 +129,7 @@ class SpiderVenomTargetTemperatureNumber(SpiderVenomEntity, NumberEntity):
                 self.entity_description.desired_fn(temperature)
             )
         except SpiderVenomApiError as err:
-            raise HomeAssistantError(
-                f"Unable to set {self.entity_description.name}: {err}"
-            ) from err
+            raise HomeAssistantError(f"Unable to set {label}: {err}") from err
 
         self.coordinator.set_optimistic_value(
             self.entity_description.reported_path,

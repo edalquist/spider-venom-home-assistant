@@ -27,28 +27,28 @@ class SpiderVenomSwitchDescription(SwitchEntityDescription):
 SWITCHES: tuple[SpiderVenomSwitchDescription, ...] = (
     SpiderVenomSwitchDescription(
         key="power_control",
-        name="Power control",
+        translation_key="power_control",
         device_class=SwitchDeviceClass.SWITCH,
         reported_path=("pwrOn",),
         desired_fn=lambda value: {"pwrOn": value},
     ),
     SpiderVenomSwitchDescription(
         key="engaged_control",
-        name="Engaged control",
+        translation_key="engaged_control",
         device_class=SwitchDeviceClass.SWITCH,
         reported_path=("engaged",),
         desired_fn=lambda value: {"engaged": value},
     ),
     SpiderVenomSwitchDescription(
         key="paused_control",
-        name="Paused control",
+        translation_key="paused_control",
         device_class=SwitchDeviceClass.SWITCH,
         reported_path=("paused",),
         desired_fn=lambda value: {"paused": value},
     ),
     SpiderVenomSwitchDescription(
         key="high_temp_mode_control",
-        name="High temperature mode control",
+        translation_key="high_temp_mode_control",
         device_class=SwitchDeviceClass.SWITCH,
         reported_path=("heat", "t2", "highTemp_enable"),
         desired_fn=lambda value: {"heat": {"t2": {"highTemp_enable": value}}},

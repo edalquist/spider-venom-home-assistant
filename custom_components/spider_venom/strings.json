@@ -37,5 +37,47 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "model": { "name": "Model" },
+      "firmware_version": { "name": "Firmware version" },
+      "mac_address": { "name": "MAC address" },
+      "main_temp": { "name": "Current temperature" },
+      "target_min": { "name": "Minimum target temperature" },
+      "target_max": { "name": "Maximum target temperature" },
+      "heat_intensity": { "name": "Heat intensity" },
+      "heat_start_time": { "name": "Heat start time" },
+      "high_temp_limit": { "name": "High temperature notification limit" },
+      "low_temp_limit": { "name": "Low temperature notification limit" },
+      "rssi": { "name": "Signal strength" },
+      "ssid": { "name": "Wi-Fi SSID" },
+      "bssid": { "name": "Wi-Fi BSSID" },
+      "update_flag": { "name": "Update flag" },
+      "trigger_flag": { "name": "Trigger flag" },
+      "errors": { "name": "Errors" },
+      "shadow_last_updated": { "name": "Shadow last updated" },
+      "last_reported": { "name": "Last reported" },
+      "probe_1_temp": { "name": "Probe 1 temperature" },
+      "probe_2_temp": { "name": "Probe 2 temperature" }
+    },
+    "binary_sensor": {
+      "door": { "name": "Door" },
+      "heating": { "name": "Heating" },
+      "fahrenheit_mode": { "name": "Fahrenheit mode" },
+      "high_temp_notification": { "name": "High temperature notification" },
+      "low_temp_notification": { "name": "Low temperature notification" }
+    },
+    "number": {
+      "target_temperature_control": { "name": "Target temperature control" },
+      "probe_1_target_temperature_control": { "name": "Probe 1 target temperature control" },
+      "probe_2_target_temperature_control": { "name": "Probe 2 target temperature control" }
+    },
+    "switch": {
+      "power_control": { "name": "Power control" },
+      "engaged_control": { "name": "Engaged control" },
+      "paused_control": { "name": "Paused control" },
+      "high_temp_mode_control": { "name": "High temperature mode control" }
+    }
   }
 }

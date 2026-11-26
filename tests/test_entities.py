@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
+from custom_components.spider_venom.binary_sensor import BINARY_SENSORS
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
     DEFAULT_SCAN_INTERVAL,
@@ -17,7 +20,8 @@ from custom_components.spider_venom.const import (
 )
 from custom_components.spider_venom.coordinator import SpiderVenomDataUpdateCoordinator
 from custom_components.spider_venom.number import NUMBERS
-from custom_components.spider_venom.sensor import _errors, _latest_reported_timestamp, _timestamp
+from custom_components.spider_venom.sensor import SENSORS, _errors, _latest_reported_timestamp, _timestamp
+from custom_components.spider_venom.switch import SWITCHES
 from homeassistant.components.number import NumberDeviceClass
 from homeassistant.const import CONF_SCAN_INTERVAL, EntityCategory
 from homeassistant.core import HomeAssistant
@@ -330,3 +334,21 @@ def test_sensor_helper_functions() -> None:
     assert _latest_reported_timestamp(
         {"metadata": {"reported": {"a": {"timestamp": 1700000100}, "b": {"c": {"timestamp": 1700000200}}}}}
     ) == datetime.fromtimestamp(1700000200, UTC)
+
+
+def test_entity_translation_keys_present_in_translations() -> None:
+    """Verify every entity description defines translation_key present in strings and en.json."""
+    strings = json.loads(Path("custom_components/spider_venom/strings.json").read_text(encoding="utf-8"))
+    en = json.loads(Path("custom_components/spider_venom/translations/en.json").read_text(encoding="utf-8"))
+
+    for platform, descriptions in (
+        ("sensor", SENSORS),
+        ("binary_sensor", BINARY_SENSORS),
+        ("number", NUMBERS),
+        ("switch", SWITCHES),
+    ):
+        for desc in descriptions:
+            assert desc.translation_key == desc.key
+            assert desc.key in strings["entity"][platform]
+            assert desc.key in en["entity"][platform]
+            assert strings["entity"][platform][desc.key]["name"] == en["entity"][platform][desc.key]["name"]
