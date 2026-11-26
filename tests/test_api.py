@@ -492,6 +492,17 @@ def test_redacted_body_masks_sensitive_fields_and_truncates() -> None:
                 "secret_access_key": "SECRETKEY",
                 "SessionToken": "SESSIONTOK",
             },
+            "reported": {
+                "ssid": "HomeNetwork",
+                "bssid": "11:22:33:44:55:66",
+                "mac": "AA:BB:CC:DD:EE:FF",
+            },
+            "profile": {
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "phone": "555-0100",
+                "address": "123 Patio Ln",
+            },
             "device": {"thingName": "venom-1"},
         }
     )
@@ -505,10 +516,31 @@ def test_redacted_body_masks_sensitive_fields_and_truncates() -> None:
     assert redacted["Credentials"]["AccessKeyId"] == "***REDACTED***"
     assert redacted["Credentials"]["secret_access_key"] == "***REDACTED***"
     assert redacted["Credentials"]["SessionToken"] == "***REDACTED***"
+    assert redacted["reported"]["ssid"] == "***REDACTED***"
+    assert redacted["reported"]["bssid"] == "***REDACTED***"
+    assert redacted["reported"]["mac"] == "***REDACTED***"
+    assert redacted["profile"]["firstName"] == "***REDACTED***"
+    assert redacted["profile"]["lastName"] == "***REDACTED***"
+    assert redacted["profile"]["phone"] == "***REDACTED***"
+    assert redacted["profile"]["address"] == "***REDACTED***"
     assert redacted["device"]["thingName"] == "venom-1"
 
     assert _redacted_body("<html>err</html>", redact_non_json=True) == "<non-JSON response body omitted>"
     assert _redacted_body(json.dumps({"data": "x" * 5000})).endswith("...<truncated>")
+
+
+async def test_cognito_error_body_is_redacted_in_exception() -> None:
+    """Verify non-200 Cognito responses without __type redact sensitive JSON fields."""
+    session = MagicMock()
+    session.post.return_value = MockResponse(
+        400,
+        json.dumps({"email": "secret@example.com", "message": "Bad identity"}),
+    )
+    client = _make_client(session)
+    with pytest.raises(SpiderVenomApiError) as exc_info:
+        await client._async_cognito_post("GetId", {"IdentityPoolId": "pool"})
+    assert "secret@example.com" not in str(exc_info.value)
+    assert "***REDACTED***" in str(exc_info.value)
 
 
 @pytest.mark.no_mock_mqtt_push

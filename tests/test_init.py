@@ -13,6 +13,7 @@ import yaml
 
 from custom_components.spider_venom import async_setup
 from custom_components.spider_venom.api import SpiderVenomApiError
+from custom_components.spider_venom.diagnostics import async_get_config_entry_diagnostics
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
     CONF_THING_NAME,
@@ -454,3 +455,25 @@ async def test_service_rounds_float_supports_area_target_and_has_translations(
         )
         mock_set_temp.assert_called_once_with(301)
         assert entry2.runtime_data.get_optimistic_value(("heat", "t2", "trgt")) == (True, 301)
+
+
+async def test_config_entry_diagnostics_redacts_sensitive_fields(hass: HomeAssistant) -> None:
+    """Verify diagnostics output redacts sensitive identifiers and Wi-Fi details."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=SAMPLE_SHADOW,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag["entry_data"]["thing_name"] == "**REDACTED**"
+    reported = diag["coordinator_data"]["state"]["reported"]
+    assert reported["mac"] == "**REDACTED**"
+    assert reported["ssid"] == "**REDACTED**"
+    assert reported["bssid"] == "**REDACTED**"
+    assert reported["mainTemp"] == 225
+    assert diag["last_update_success"] is True

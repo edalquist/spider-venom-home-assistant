@@ -37,19 +37,26 @@ _MAX_NON_JSON_LOG_CHARS = 500
 _REDACTED_KEYS = {
     "accesskeyid",
     "accesstoken",
+    "address",
     "apikey",
     "authorization",
+    "bssid",
     "cookie",
     "email",
+    "firstname",
     "identityid",
     "idtoken",
     "jwt",
+    "lastname",
+    "mac",
     "password",
+    "phone",
     "refreshtoken",
     "secret",
     "secretaccesskey",
     "secretkey",
     "sessiontoken",
+    "ssid",
 }
 
 
@@ -803,7 +810,7 @@ class SpiderVenomClient:
             raise SpiderVenomApiError(f"Cognito {target} request failed: {err}") from err
 
         if status != 200:
-            error_detail: str = body[:300]
+            error_detail: str = _redacted_body(body)[:300]
             try:
                 err_parsed = json.loads(body) if body else {}
             except json.JSONDecodeError:
