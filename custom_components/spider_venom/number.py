@@ -13,7 +13,7 @@ from homeassistant.components.number import (
 )
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import SpiderVenomApiError
@@ -116,18 +116,40 @@ class SpiderVenomTargetTemperatureNumber(SpiderVenomEntity, NumberEntity):
             return None
         return raw
 
+    @property
+    def native_min_value(self) -> float:
+        """Return the minimum target temperature."""
+        if self.entity_description.key == "target_temperature_control":
+            reported_min = value_at_path(self.coordinator.reported, ("heat", "t2", "min"))
+            if isinstance(reported_min, int | float) and not isinstance(reported_min, bool):
+                return float(reported_min)
+        return super().native_min_value
+
+    @property
+    def native_max_value(self) -> float:
+        """Return the maximum target temperature."""
+        if self.entity_description.key == "target_temperature_control":
+            reported_max = value_at_path(self.coordinator.reported, ("heat", "t2", "max"))
+            if isinstance(reported_max, int | float) and not isinstance(reported_max, bool):
+                return float(reported_max)
+        return super().native_max_value
+
     async def async_set_native_value(self, value: float) -> None:
         """Set the target temperature."""
         temperature = int(round(value))
-        minimum = self.entity_description.native_min_value
-        maximum = self.entity_description.native_max_value
+        minimum: float | None = self.native_min_value
+        maximum: float | None = self.native_max_value
         label = self.name if isinstance(self.name, str) else self.entity_description.key
         if (minimum is not None and temperature < minimum) or (
             maximum is not None and temperature > maximum
         ):
-            raise HomeAssistantError(
-                f"{label} must be between {minimum:g} and {maximum:g} F"
-            )
+            if minimum is not None and maximum is not None:
+                msg = f"{label} must be between {minimum:g} and {maximum:g}"
+            elif minimum is not None:
+                msg = f"{label} must be at least {minimum:g}"
+            else:
+                msg = f"{label} must be at most {maximum:g}"
+            raise ServiceValidationError(msg)
 
         try:
             await self.coordinator.client.async_update_desired(

@@ -11,6 +11,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -41,6 +42,7 @@ BINARY_SENSORS: tuple[SpiderVenomBinarySensorDescription, ...] = (
     SpiderVenomBinarySensorDescription(
         key="fahrenheit_mode",
         translation_key="fahrenheit_mode",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=path_value_fn(("fah",)),
     ),
     SpiderVenomBinarySensorDescription(

@@ -26,7 +26,7 @@ from custom_components.spider_venom.switch import SWITCHES
 from homeassistant.components.number import NumberDeviceClass
 from homeassistant.const import CONF_SCAN_INTERVAL, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
@@ -120,6 +120,11 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "door")) == "off"
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "heating")) == "on"
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "low_temp_notification")) == "on"
+
+    # Diagnostic binary sensors
+    fahrenheit_reg = registry.async_get(_entity_id_by_key(hass, "binary_sensor", "fahrenheit_mode"))
+    assert fahrenheit_reg is not None
+    assert fahrenheit_reg.entity_category is EntityCategory.DIAGNOSTIC
 
     # Duplicate read-only entities removed
     for platform, dup_key in (
@@ -327,8 +332,46 @@ async def test_number_entity_rejects_out_of_range_directly(hass: HomeAssistant) 
     entity = hass.data["entity_components"]["number"].get_entity(target_entity)
     assert entity is not None
 
-    with pytest.raises(HomeAssistantError):
+    with pytest.raises(ServiceValidationError):
         await entity.async_set_native_value(100)
+
+
+async def test_number_entity_uses_dynamic_pit_bounds_from_shadow(hass: HomeAssistant) -> None:
+    """Verify pit target temperature honors dynamic heat.t2.min/max from reported state."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    high_temp_shadow = deepcopy(SAMPLE_SHADOW)
+    high_temp_shadow["state"]["reported"]["heat"]["t2"]["max"] = 650
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=high_temp_shadow,
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_update_desired",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as mock_update,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        target_entity = _entity_id_by_key(hass, "number", "target_temperature_control")
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": target_entity, "value": 600},
+            blocking=True,
+        )
+        mock_update.assert_called_once_with({"heat": {"t2": {"trgt": 600}}})
+
+        entity = hass.data["entity_components"]["number"].get_entity(target_entity)
+        assert entity is not None
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_native_value(700)
 
 
 async def test_coordinator_null_state_and_interval_guard(hass: HomeAssistant) -> None:

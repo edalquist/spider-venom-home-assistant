@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, Device
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_THING_NAME, DOMAIN
-from .coordinator import SpiderVenomDataUpdateCoordinator
+from .coordinator import SpiderVenomDataUpdateCoordinator, value_at_path
 
 
 class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
@@ -47,16 +47,6 @@ class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
             name=self._device_name,
             sw_version=str(reported.get("vers")) if reported.get("vers") else None,
         )
-
-
-def value_at_path(data: dict[str, Any], path: tuple[str, ...]) -> Any:
-    """Return a nested value from a dict."""
-    value: Any = data
-    for key in path:
-        if not isinstance(value, dict):
-            return None
-        value = value.get(key)
-    return value
 
 
 def path_value_fn(path: tuple[str, ...]) -> Callable[[dict[str, Any]], Any]:

@@ -13,7 +13,7 @@ from homeassistant.const import (
     ATTR_LABEL_ID,
     EVENT_HOMEASSISTANT_STOP,
 )
-from homeassistant.core import Event, HomeAssistant, ServiceCall
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -123,6 +123,7 @@ async def _async_reload_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+@callback
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register Spider Grills Venom services."""
     if hass.services.has_service(DOMAIN, SERVICE_SET_TARGET_TEMPERATURE):

@@ -44,7 +44,7 @@ def _extract_reported(data: dict[str, Any] | None) -> dict[str, Any]:
     return reported if isinstance(reported, dict) else {}
 
 
-def _value_at_path(data: dict[str, Any], path: tuple[str, ...]) -> Any:
+def value_at_path(data: dict[str, Any], path: tuple[str, ...]) -> Any:
     """Return a nested value from a dict."""
     value: Any = data
     for key in path:
@@ -144,7 +144,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if prior is not None and prior.unsub is not None:
             prior.unsub()
 
-        baseline = _value_at_path(self.reported, path)
+        baseline = value_at_path(self.reported, path)
         expires_at = dt_util.utcnow() + ttl
         entry = _OptimisticEntry(value=value, baseline=baseline, expires_at=expires_at)
 
@@ -165,6 +165,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False, None
         return True, entry.value
 
+    @callback
     def async_clear_optimistic_timers(self) -> None:
         """Cancel all pending optimistic expiration timers."""
         for entry in self._optimistic.values():
@@ -180,7 +181,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         reported = _extract_reported(data)
         now = dt_util.utcnow()
         for path, entry in list(self._optimistic.items()):
-            fresh_value = _value_at_path(reported, path)
+            fresh_value = value_at_path(reported, path)
             baseline = entry.baseline
             if isinstance(entry.value, bool):
                 fresh_cmp: Any = bool(fresh_value) if fresh_value is not None else None
