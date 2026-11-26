@@ -99,17 +99,22 @@ class SpiderVenomTargetTemperatureNumber(SpiderVenomEntity, NumberEntity):
         self.entity_description = description
 
     @property
-    def native_value(self) -> Any:
+    def native_value(self) -> float | None:
         """Return the current target temperature."""
         is_optimistic, optimistic_value = self.coordinator.get_optimistic_value(
             self.entity_description.reported_path
         )
-        if is_optimistic:
-            return optimistic_value
-        return value_at_path(
-            self.coordinator.reported,
-            self.entity_description.reported_path,
+        raw = (
+            optimistic_value
+            if is_optimistic
+            else value_at_path(
+                self.coordinator.reported,
+                self.entity_description.reported_path,
+            )
         )
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
+            return None
+        return raw
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the target temperature."""

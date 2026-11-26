@@ -753,11 +753,19 @@ class SpiderVenomClient:
                 )
 
             try:
+                access_key_id = credentials["AccessKeyId"]
+                secret_key = credentials["SecretKey"]
+                session_token = credentials["SessionToken"]
+                if not all(
+                    isinstance(field, str) and field
+                    for field in (access_key_id, secret_key, session_token)
+                ):
+                    raise TypeError("Invalid credential string field")
                 expiration = datetime.fromtimestamp(float(credentials["Expiration"]), UTC)
                 self._credentials = _Credentials(
-                    access_key_id=credentials["AccessKeyId"],
-                    secret_key=credentials["SecretKey"],
-                    session_token=credentials["SessionToken"],
+                    access_key_id=access_key_id,
+                    secret_key=secret_key,
+                    session_token=session_token,
                     expiration=expiration,
                     identity_id=identity,
                 )

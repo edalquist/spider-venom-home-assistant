@@ -372,6 +372,16 @@ def test_sensor_helper_functions() -> None:
     assert _latest_reported_timestamp(
         {"metadata": {"reported": {"a": {"timestamp": 1700000100}, "b": {"c": {"timestamp": 1700000200}}}}}
     ) == datetime.fromtimestamp(1700000200, UTC)
+    assert _latest_reported_timestamp(
+        {
+            "metadata": {
+                "reported": {
+                    "a": {"timestamp": 1700000100},
+                    "errors": [{"timestamp": 1700000300}],
+                }
+            }
+        }
+    ) == datetime.fromtimestamp(1700000300, UTC)
 
 
 def test_entity_translation_keys_present_in_translations() -> None:
@@ -501,3 +511,28 @@ async def test_coordinator_reconnect_callback_requests_refresh(hass: HomeAssista
         entry.runtime_data._handle_reconnect()
         await hass.async_block_till_done()
         assert mock_get.call_count == initial_calls + 1
+
+
+async def test_numeric_entities_ignore_booleans_and_non_numeric_values(hass: HomeAssistant) -> None:
+    """Verify numeric sensors and numbers return unknown on booleans or strings instead of raising."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    bad_shadow = deepcopy(SAMPLE_SHADOW)
+    bad_shadow["state"]["reported"]["mainTemp"] = "err"
+    bad_shadow["state"]["reported"]["RSSI"] = True
+    bad_shadow["state"]["reported"]["heat"]["t2"]["trgt"] = False
+    bad_shadow["state"]["reported"]["probes"]["p1"]["temp"] = None
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=bad_shadow,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "main_temp")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "rssi")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "number", "target_temperature_control")) == "unknown"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "probe_1_temp")) == "unknown"

@@ -1038,6 +1038,14 @@ async def test_cognito_edge_cases_and_identity_recovery() -> None:
     with pytest.raises(SpiderVenomApiError, match="credentials response was incomplete"):
         await client._async_get_credentials()
 
+    for bad_creds in (
+        {"AccessKeyId": None, "SecretKey": "S", "SessionToken": "T", "Expiration": future_exp},
+        {"AccessKeyId": "", "SecretKey": "S", "SessionToken": "T", "Expiration": future_exp},
+    ):
+        session.post.return_value = MockResponse(200, json.dumps({"Credentials": bad_creds}))
+        with pytest.raises(SpiderVenomApiError, match="credentials response was incomplete"):
+            await client._async_get_credentials()
+
     session.post.return_value = MockResponse(200, "not-json")
     with pytest.raises(SpiderVenomApiError, match="was not JSON"):
         await client._async_cognito_post("GetId", {"IdentityPoolId": "pool"})

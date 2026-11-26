@@ -30,6 +30,18 @@ class SpiderVenomSensorDescription(SensorEntityDescription):
     use_root: bool = False
 
 
+def _numeric_path_value_fn(path: tuple[str, ...]) -> Callable[[dict[str, Any]], int | float | None]:
+    """Return a value extractor returning only non-boolean numeric values."""
+
+    def numeric_value(reported: dict[str, Any]) -> int | float | None:
+        value = value_at_path(reported, path)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        return value
+
+    return numeric_value
+
+
 def _timestamp(path: tuple[str, ...]) -> Callable[[dict[str, Any]], Any]:
     def timestamp_value(reported: dict[str, Any]) -> datetime | None:
         value = value_at_path(reported, path)
@@ -61,6 +73,11 @@ def _latest_reported_timestamp(shadow: dict[str, Any]) -> datetime | None:
     stack: list[Any] = [reported_meta]
     while stack:
         node = stack.pop()
+        if isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict | list):
+                    stack.append(item)
+            continue
         if not isinstance(node, dict):
             continue
         ts = node.get("timestamp")
@@ -69,7 +86,7 @@ def _latest_reported_timestamp(shadow: dict[str, Any]) -> datetime | None:
         ):
             latest = float(ts)
         for key, child in node.items():
-            if key != "timestamp" and isinstance(child, dict):
+            if key != "timestamp" and isinstance(child, dict | list):
                 stack.append(child)
 
     if latest is None:
@@ -106,28 +123,28 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("mainTemp",)),
+        value_fn=_numeric_path_value_fn(("mainTemp",)),
     ),
     SpiderVenomSensorDescription(
         key="target_min",
         translation_key="target_min",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
-        value_fn=path_value_fn(("heat", "t2", "min")),
+        value_fn=_numeric_path_value_fn(("heat", "t2", "min")),
     ),
     SpiderVenomSensorDescription(
         key="target_max",
         translation_key="target_max",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
-        value_fn=path_value_fn(("heat", "t2", "max")),
+        value_fn=_numeric_path_value_fn(("heat", "t2", "max")),
     ),
     SpiderVenomSensorDescription(
         key="heat_intensity",
         translation_key="heat_intensity",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("heat", "t2", "intensity")),
+        value_fn=_numeric_path_value_fn(("heat", "t2", "intensity")),
     ),
     SpiderVenomSensorDescription(
         key="heat_start_time",
@@ -140,14 +157,14 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         translation_key="high_temp_limit",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
-        value_fn=path_value_fn(("heat", "t2", "high_limit")),
+        value_fn=_numeric_path_value_fn(("heat", "t2", "high_limit")),
     ),
     SpiderVenomSensorDescription(
         key="low_temp_limit",
         translation_key="low_temp_limit",
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
-        value_fn=path_value_fn(("heat", "t2", "low_limit")),
+        value_fn=_numeric_path_value_fn(("heat", "t2", "low_limit")),
     ),
     SpiderVenomSensorDescription(
         key="rssi",
@@ -156,7 +173,7 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=path_value_fn(("RSSI",)),
+        value_fn=_numeric_path_value_fn(("RSSI",)),
     ),
     SpiderVenomSensorDescription(
         key="ssid",
@@ -213,7 +230,7 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("probes", "p1", "temp")),
+        value_fn=_numeric_path_value_fn(("probes", "p1", "temp")),
     ),
     SpiderVenomSensorDescription(
         key="probe_2_temp",
@@ -221,7 +238,7 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=path_value_fn(("probes", "p2", "temp")),
+        value_fn=_numeric_path_value_fn(("probes", "p2", "temp")),
     ),
 )
 
