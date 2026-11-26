@@ -362,3 +362,30 @@ async def test_setup_stops_push_when_first_refresh_fails_and_on_ha_stop(hass: Ho
         await hass.async_block_till_done()
 
     mock_stop_push2.assert_awaited_once()
+
+
+async def test_setup_stops_push_when_platform_forward_fails(hass: HomeAssistant) -> None:
+    """Verify async_stop_push runs when async_forward_entry_setups raises."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id="venom-forward-fail")
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=SAMPLE_SHADOW,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            side_effect=RuntimeError("platform load failed"),
+        ),
+        patch(
+            "custom_components.spider_venom.coordinator.SpiderVenomDataUpdateCoordinator.async_stop_push",
+            new_callable=AsyncMock,
+        ) as mock_stop_push,
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state.name == "SETUP_ERROR"
+    mock_stop_push.assert_awaited_once()

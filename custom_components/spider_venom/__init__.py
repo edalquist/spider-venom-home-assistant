@@ -70,8 +70,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) 
     entry.runtime_data = coordinator
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop_on_shutdown))
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        await coordinator.async_stop_push()
+        raise
     _async_register_services(hass)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
