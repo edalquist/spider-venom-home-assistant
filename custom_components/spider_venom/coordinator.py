@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -12,6 +12,7 @@ from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import SpiderVenomApiError, SpiderVenomClient
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
@@ -83,6 +84,16 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self._optimistic: dict[tuple[str, ...], _OptimisticEntry] = {}
+        self._last_shadow_version: int | None = None
+
+    def _is_stale_version(self, data: dict[str, Any]) -> bool:
+        """Return True if data carries a strictly older shadow version than already seen."""
+        version = data.get("version")
+        if isinstance(version, int) and not isinstance(version, bool):
+            if self._last_shadow_version is not None and version < self._last_shadow_version:
+                return True
+            self._last_shadow_version = version
+        return False
 
     async def async_start_push(self) -> None:
         """Start the persistent MQTT push connection."""
@@ -100,6 +111,8 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _handle_push_update(self, data: dict[str, Any]) -> None:
         """Apply a pushed shadow update from MQTT."""
+        if self._is_stale_version(data):
+            return
         self._reconcile_optimistic(data)
         self.async_set_updated_data(data)
 
@@ -110,6 +123,8 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except SpiderVenomApiError as err:
             raise UpdateFailed(str(err)) from err
 
+        if self._is_stale_version(data) and self.data is not None:
+            return self.data
         self._reconcile_optimistic(data)
         return data
 
@@ -130,7 +145,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             prior.unsub()
 
         baseline = _value_at_path(self.reported, path)
-        expires_at = datetime.now(UTC) + ttl
+        expires_at = dt_util.utcnow() + ttl
         entry = _OptimisticEntry(value=value, baseline=baseline, expires_at=expires_at)
 
         @callback
@@ -146,7 +161,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_optimistic_value(self, path: tuple[str, ...]) -> tuple[bool, Any]:
         """Return (is_active, value) for an optimistic override without mutating state."""
         entry = self._optimistic.get(path)
-        if entry is None or datetime.now(UTC) >= entry.expires_at:
+        if entry is None or dt_util.utcnow() >= entry.expires_at:
             return False, None
         return True, entry.value
 
@@ -163,7 +178,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         reported = _extract_reported(data)
-        now = datetime.now(UTC)
+        now = dt_util.utcnow()
         for path, entry in list(self._optimistic.items()):
             fresh_value = _value_at_path(reported, path)
             baseline = entry.baseline

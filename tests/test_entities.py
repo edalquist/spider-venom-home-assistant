@@ -536,3 +536,47 @@ async def test_numeric_entities_ignore_booleans_and_non_numeric_values(hass: Hom
     assert _state(hass, _entity_id_by_key(hass, "sensor", "rssi")) == "unknown"
     assert _state(hass, _entity_id_by_key(hass, "number", "target_temperature_control")) == "unknown"
     assert _state(hass, _entity_id_by_key(hass, "sensor", "probe_1_temp")) == "unknown"
+
+
+async def test_coordinator_ignores_stale_shadow_versions(hass: HomeAssistant) -> None:
+    """Verify older shadow versions from push or poll do not overwrite newer versions."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    initial = deepcopy(SAMPLE_SHADOW)
+    initial["version"] = 10
+    stale = deepcopy(SAMPLE_SHADOW)
+    stale["version"] = 9
+    stale["state"]["reported"]["mainTemp"] = 100
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        side_effect=[initial, stale],
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        main_temp_eid = _entity_id_by_key(hass, "sensor", "main_temp")
+        assert _state(hass, main_temp_eid) == "225"
+
+        # Newer push updates to version 12
+        newer = deepcopy(SAMPLE_SHADOW)
+        newer["version"] = 12
+        newer["state"]["reported"]["mainTemp"] = 240
+        entry.runtime_data._handle_push_update(newer)
+        await hass.async_block_till_done()
+        assert _state(hass, main_temp_eid) == "240"
+
+        # Stale push (version 11 < 12) is ignored
+        older_push = deepcopy(SAMPLE_SHADOW)
+        older_push["version"] = 11
+        older_push["state"]["reported"]["mainTemp"] = 180
+        entry.runtime_data._handle_push_update(older_push)
+        await hass.async_block_till_done()
+        assert _state(hass, main_temp_eid) == "240"
+
+        # Stale poll (version 9 < 12) is ignored
+        await entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+        assert _state(hass, main_temp_eid) == "240"
