@@ -69,6 +69,12 @@ SAMPLE_SHADOW: dict[str, Any] = {
             },
         }
     },
+    "metadata": {
+        "reported": {
+            "mainTemp": {"timestamp": 1700000100},
+            "heat": {"t2": {"trgt": {"timestamp": 1700000110}}},
+        }
+    },
     "timestamp": 1700000123,
 }
 

@@ -17,7 +17,7 @@ from custom_components.spider_venom.const import (
 )
 from custom_components.spider_venom.coordinator import SpiderVenomDataUpdateCoordinator
 from custom_components.spider_venom.number import NUMBERS
-from custom_components.spider_venom.sensor import _errors, _timestamp
+from custom_components.spider_venom.sensor import _errors, _latest_reported_timestamp, _timestamp
 from homeassistant.components.number import NumberDeviceClass
 from homeassistant.const import CONF_SCAN_INTERVAL, EntityCategory
 from homeassistant.core import HomeAssistant
@@ -69,6 +69,10 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         hass.states.get(_entity_id_by_key(hass, "sensor", "shadow_last_updated")).state
         == "2023-11-14T22:15:23+00:00"
     )
+    assert (
+        hass.states.get(_entity_id_by_key(hass, "sensor", "last_reported")).state
+        == "2023-11-14T22:15:10+00:00"
+    )
 
     # Diagnostic entity categories
     registry = er.async_get(hass)
@@ -83,6 +87,7 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         "trigger_flag",
         "errors",
         "shadow_last_updated",
+        "last_reported",
     ):
         reg_entry = registry.async_get(_entity_id_by_key(hass, "sensor", diag_key))
         assert reg_entry is not None
@@ -300,3 +305,12 @@ def test_sensor_helper_functions() -> None:
     assert _errors({}) is None
     long_errors = _errors({"errors": [f"ERR{i:03d}" for i in range(100)]})
     assert long_errors is not None and len(long_errors) == 255
+
+    assert _latest_reported_timestamp({}) is None
+    assert _latest_reported_timestamp({"metadata": None}) is None
+    assert _latest_reported_timestamp({"metadata": {"reported": {}}}) is None
+    assert _latest_reported_timestamp({"metadata": {"reported": {"a": {"timestamp": True}}}}) is None
+    assert _latest_reported_timestamp({"metadata": {"reported": {"a": {"timestamp": 1e20}}}}) is None
+    assert _latest_reported_timestamp(
+        {"metadata": {"reported": {"a": {"timestamp": 1700000100}, "b": {"c": {"timestamp": 1700000200}}}}}
+    ) == datetime.fromtimestamp(1700000200, UTC)

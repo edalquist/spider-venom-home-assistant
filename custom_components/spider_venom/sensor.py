@@ -50,6 +50,36 @@ def _errors(reported: dict[str, Any]) -> str | None:
     return ",".join(str(error) for error in errors)[:255]
 
 
+def _latest_reported_timestamp(shadow: dict[str, Any]) -> datetime | None:
+    """Return the newest timestamp from shadow metadata.reported."""
+    metadata = shadow.get("metadata")
+    reported_meta = metadata.get("reported") if isinstance(metadata, dict) else None
+    if not isinstance(reported_meta, dict):
+        return None
+
+    latest: float | None = None
+    stack: list[Any] = [reported_meta]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        ts = node.get("timestamp")
+        if not isinstance(ts, bool) and isinstance(ts, int | float) and ts > 0 and (
+            latest is None or ts > latest
+        ):
+            latest = float(ts)
+        for key, child in node.items():
+            if key != "timestamp" and isinstance(child, dict):
+                stack.append(child)
+
+    if latest is None:
+        return None
+    try:
+        return datetime.fromtimestamp(latest, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
     SpiderVenomSensorDescription(
         key="model",
@@ -172,6 +202,14 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         use_root=True,
         value_fn=_timestamp(("timestamp",)),
+    ),
+    SpiderVenomSensorDescription(
+        key="last_reported",
+        name="Last reported",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        use_root=True,
+        value_fn=_latest_reported_timestamp,
     ),
     SpiderVenomSensorDescription(
         key="probe_1_temp",
