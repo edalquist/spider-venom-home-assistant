@@ -26,6 +26,7 @@ from custom_components.spider_venom.api import (
     SpiderVenomClient,
     _Credentials,
     _redacted_body,
+    _safe_call_soon_threadsafe,
 )
 
 
@@ -168,12 +169,13 @@ async def test_mqtt_shadow_get_and_update_filters_client_token_and_caches_ssl() 
             assert port == 443
             assert self.connect_timeout == 10.0
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             assert topics[0][0].endswith("/accepted")
             assert topics[1][0].endswith("/rejected")
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
-        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             published_messages.append((topic, payload))
             req = json.loads(payload)
             self.on_message(
@@ -192,6 +194,7 @@ async def test_mqtt_shadow_get_and_update_filters_client_token_and_caches_ssl() 
                     json.dumps({"clientToken": req["clientToken"], "state": {"reported": {"mainTemp": 225}}}).encode(),
                 ),
             )
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -242,10 +245,11 @@ async def test_mqtt_rejected_logs_actual_code_and_raises(caplog: pytest.LogCaptu
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: Any) -> None:
+        def subscribe(self, topics: Any) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
-        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             token = json.loads(payload)["clientToken"]
             self.on_message(
                 self,
@@ -255,6 +259,7 @@ async def test_mqtt_rejected_logs_actual_code_and_raises(caplog: pytest.LogCaptu
                     json.dumps({"clientToken": token, "code": 400, "message": "Invalid payload"}).encode(),
                 ),
             )
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -321,10 +326,11 @@ async def test_mqtt_auth_failure_invalidates_credentials_and_retries_once() -> N
             if attempts == 1:
                 raise mqtt.WebsocketConnectionError("WebSocket handshake error, connection not upgraded")
 
-        def subscribe(self, topics: Any) -> None:
+        def subscribe(self, topics: Any) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)])
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
-        def publish(self, topic: str, payload: str, qos: int = 1) -> None:
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             token = json.loads(payload)["clientToken"]
             self.on_message(
                 self,
@@ -334,6 +340,7 @@ async def test_mqtt_auth_failure_invalidates_credentials_and_retries_once() -> N
                     json.dumps({"clientToken": token, "state": {"reported": {"mainTemp": 230}}}).encode(),
                 ),
             )
+            return MagicMock(rc=mqtt.MQTT_ERR_SUCCESS)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -541,9 +548,10 @@ async def test_persistent_mqtt_push_subscriptions_requests_and_stop() -> None:
         def connect(self, host: str, port: int, keepalive: int = 60) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             subscribed_topics.append([t for t, _qos in topics])
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             req = json.loads(payload)
@@ -672,8 +680,9 @@ async def test_persistent_mqtt_rotates_credentials_and_reconnects_on_disconnect(
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -699,9 +708,9 @@ async def test_persistent_mqtt_rotates_credentials_and_reconnects_on_disconnect(
         assert client._credentials is not None
         assert client._credentials.access_key_id == "AK2"
 
-        # Simulate unexpected auth disconnect -> clears credentials and reconnects (#3)
+        # Simulate unexpected MQTT v3.1.1 server disconnect -> clears credentials and reconnects (#3)
         created_clients[1].on_disconnect(
-            created_clients[1], None, None, FakeReasonCode(True, "Not authorized")
+            created_clients[1], None, None, FakeReasonCode(True, "Unspecified error")
         )
         await asyncio.wait_for(reconnect_event.wait(), timeout=2.0)
         assert len(created_clients) >= 3
@@ -762,8 +771,9 @@ async def test_persistent_mqtt_initial_start_failures_and_auth_retry() -> None:
         await client.async_start(lambda _doc: None)
 
     class SubscribeRefusedClient(TimeoutClient):
-        def subscribe(self, topics: Any) -> None:
+        def subscribe(self, topics: Any) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(True, "Unspecified error")])
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -808,8 +818,9 @@ async def test_persistent_mqtt_initial_start_failures_and_auth_retry() -> None:
     attempts = 0
 
     class InitialAuthRetryClient(TimeoutClient):
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             nonlocal attempts
@@ -856,8 +867,9 @@ async def test_persistent_mqtt_initial_start_failures_and_auth_retry() -> None:
             if ws_attempts == 1:
                 raise mqtt.WebsocketConnectionError("WebSocket handshake error, connection not upgraded")
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -899,8 +911,9 @@ async def test_persistent_mqtt_request_errors_malformed_messages_and_disconnect(
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             if publish_mode == "rc_error":
@@ -931,6 +944,7 @@ async def test_persistent_mqtt_request_errors_malformed_messages_and_disconnect(
     with (
         patch("custom_components.spider_venom.api.mqtt.Client", PersistentErrorClient),
         patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_get_credentials", return_value=_valid_creds()),
         patch.object(client, "_async_sleep_interruptible", return_value=None),
     ):
         await client.async_start(pushed_docs.append)
@@ -1086,9 +1100,9 @@ async def test_async_stop_wakes_pending_subscribe_and_guards_loop_start() -> Non
             loop_started = True
             self.on_connect(self, None, None, FakeReasonCode(False))
 
-        def subscribe(self, topics: Any) -> None:
+        def subscribe(self, topics: Any) -> tuple[int, int]:
             # Deliberately never fire on_subscribe
-            pass
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def disconnect(self) -> None:
             self.disconnected = True
@@ -1164,10 +1178,11 @@ async def test_persistent_mqtt_unexpected_exception_fails_fast_and_recovers_on_r
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
             if len(created) >= 2:
                 recovered_event.set()
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -1181,6 +1196,7 @@ async def test_persistent_mqtt_unexpected_exception_fails_fast_and_recovers_on_r
     with (
         caplog.at_level(logging.ERROR, logger="custom_components.spider_venom.api"),
         patch.object(client2, "_presigned_ws_path", side_effect=flaky_presign),
+        patch.object(client2, "_async_get_credentials", return_value=_valid_creds()),
         patch("custom_components.spider_venom.api.mqtt.Client", RecoverClient),
         patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
         patch.object(client2, "_async_sleep_interruptible", return_value=None),
@@ -1251,10 +1267,11 @@ async def test_persistent_mqtt_clamps_rotation_delay_under_clock_skew(
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
             if len(created) >= 2:
                 rotated_event.set()
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -1305,8 +1322,9 @@ async def test_persistent_mqtt_invokes_on_reconnect_only_after_first_connect() -
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def loop_start(self) -> None:
             self.on_connect(self, None, None, FakeReasonCode(False))
@@ -1325,6 +1343,7 @@ async def test_persistent_mqtt_invokes_on_reconnect_only_after_first_connect() -
     with (
         patch("custom_components.spider_venom.api.mqtt.Client", ReconnectHookClient),
         patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_get_credentials", return_value=_valid_creds()),
         patch.object(client, "_async_sleep_interruptible", return_value=None),
     ):
         await client.async_start(lambda _doc: None, on_reconnect=on_reconnect)
@@ -1361,8 +1380,9 @@ async def test_persistent_mqtt_waits_for_rotation_and_skips_short_lived_fallback
         def connect(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        def subscribe(self, topics: list[tuple[str, int]]) -> tuple[int, int]:
             self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
 
         def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
             token = json.loads(payload)["clientToken"]
@@ -1391,6 +1411,7 @@ async def test_persistent_mqtt_waits_for_rotation_and_skips_short_lived_fallback
     with (
         patch("custom_components.spider_venom.api.mqtt.Client", RotatingWaitClient),
         patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        patch.object(client, "_async_get_credentials", return_value=_valid_creds()),
         patch.object(client, "_async_sleep_interruptible", side_effect=gated_sleep),
         patch.object(client, "_mqtt_shadow_call", side_effect=AssertionError("fallback called")),
     ):
@@ -1415,3 +1436,75 @@ async def test_persistent_mqtt_waits_for_rotation_and_skips_short_lived_fallback
         shadow = await asyncio.wait_for(shadow_task, timeout=1.0)
         assert shadow["state"]["reported"]["mainTemp"] == 288
         await client.async_stop()
+
+
+@pytest.mark.no_mock_mqtt_push
+async def test_mqtt_subscribe_publish_rc_errors_and_safe_call_soon_threadsafe() -> None:
+    """Verify non-zero paho subscribe/publish return codes fail immediately and closed loops are ignored."""
+    client = _make_client()
+    client._credentials = _valid_creds()
+
+    class BadSubscribeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.on_connect: Any = None
+            self.on_subscribe: Any = None
+            self.on_message: Any = None
+            self.on_disconnect: Any = None
+
+        def ws_set_options(self, **kwargs: Any) -> None:
+            pass
+
+        def tls_set_context(self, ctx: Any) -> None:
+            pass
+
+        def connect(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def subscribe(self, topics: Any) -> tuple[int, int]:
+            return (mqtt.MQTT_ERR_NO_CONN, 1)
+
+        def loop_start(self) -> None:
+            self.on_connect(self, None, None, FakeReasonCode(False))
+
+        def disconnect(self) -> None:
+            pass
+
+        def loop_stop(self) -> None:
+            pass
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", BadSubscribeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT subscribe failed"),
+    ):
+        await client.async_get_shadow()
+
+    class BadPublishClient(BadSubscribeClient):
+        def subscribe(self, topics: Any) -> tuple[int, int]:
+            self.on_subscribe(self, None, 1, [FakeReasonCode(False)] * len(topics))
+            return (mqtt.MQTT_ERR_SUCCESS, 1)
+
+        def publish(self, topic: str, payload: str, qos: int = 1) -> Any:
+            return MagicMock(rc=mqtt.MQTT_ERR_NO_CONN)
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", BadPublishClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT publish failed"),
+    ):
+        await client.async_get_shadow()
+
+    # Persistent subscribe non-zero rc also fails without waiting for timeout
+    class PersistentBadSubscribeClient(BadSubscribeClient):
+        pass
+
+    with (
+        patch("custom_components.spider_venom.api.mqtt.Client", PersistentBadSubscribeClient),
+        patch("custom_components.spider_venom.api.ssl.create_default_context", return_value=MagicMock()),
+        pytest.raises(SpiderVenomApiError, match="MQTT subscribe failed"),
+    ):
+        await client.async_start(lambda _doc: None)
+
+    closed_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+    closed_loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+    _safe_call_soon_threadsafe(closed_loop, lambda: None)

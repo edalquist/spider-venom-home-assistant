@@ -73,6 +73,7 @@ class _AttemptState:
     disconnect_event: asyncio.Event
     subscribe_error: tuple[str, int | None] | None = None
     disconnect_error: tuple[str, int | None] | None = None
+    disconnect_is_failure: bool = False
 
     def on_connect(self, mqtt_client: mqtt.Client, topics: list[tuple[str, int]], reason_code: Any) -> None:
         if reason_code.is_failure:
@@ -80,7 +81,10 @@ class _AttemptState:
             self.subscribe_error = (f"MQTT connect refused: {reason_str}", _auth_status(reason_str))
             self.subscribe_event.set()
             return
-        mqtt_client.subscribe(topics)
+        rc, _mid = mqtt_client.subscribe(topics)
+        if rc != mqtt.MQTT_ERR_SUCCESS:
+            self.subscribe_error = (f"MQTT subscribe failed: {rc}", None)
+            self.subscribe_event.set()
 
     def on_subscribe(self, reason_codes: Any) -> None:
         if any(code.is_failure for code in reason_codes):
@@ -92,6 +96,7 @@ class _AttemptState:
 
     def on_disconnect(self, reason_code: Any) -> None:
         reason_str = str(reason_code)
+        self.disconnect_is_failure = bool(getattr(reason_code, "is_failure", False))
         self.disconnect_error = (f"MQTT disconnected: {reason_str}", _auth_status(reason_str))
         self.disconnect_event.set()
         self.subscribe_event.set()
@@ -358,7 +363,9 @@ class SpiderVenomClient:
                 *,
                 attempt_state: _AttemptState = state,
             ) -> None:
-                loop.call_soon_threadsafe(attempt_state.on_connect, mqtt_client, topics, reason_code)
+                _safe_call_soon_threadsafe(
+                    loop, attempt_state.on_connect, mqtt_client, topics, reason_code
+                )
 
             def on_subscribe(
                 mqtt_client: mqtt.Client,
@@ -369,7 +376,7 @@ class SpiderVenomClient:
                 *,
                 attempt_state: _AttemptState = state,
             ) -> None:
-                loop.call_soon_threadsafe(attempt_state.on_subscribe, reason_codes)
+                _safe_call_soon_threadsafe(loop, attempt_state.on_subscribe, reason_codes)
 
             def on_message(
                 mqtt_client: mqtt.Client,
@@ -385,15 +392,15 @@ class SpiderVenomClient:
                     return
                 if msg.topic.endswith("/update/documents"):
                     _log_response_body("IoT shadow push", 200, raw)
-                    loop.call_soon_threadsafe(self._handle_push_message, doc)
+                    _safe_call_soon_threadsafe(loop, self._handle_push_message, doc)
                     return
                 req_token = doc.get("clientToken")
                 if not isinstance(req_token, str):
                     return
                 action = "get" if "/shadow/get/" in msg.topic else "update"
                 is_rejected = msg.topic.endswith("/rejected")
-                loop.call_soon_threadsafe(
-                    self._resolve_pending, action, req_token, doc, raw, is_rejected
+                _safe_call_soon_threadsafe(
+                    loop, self._resolve_pending, action, req_token, doc, raw, is_rejected
                 )
 
             def on_disconnect(
@@ -405,7 +412,7 @@ class SpiderVenomClient:
                 *,
                 attempt_state: _AttemptState = state,
             ) -> None:
-                loop.call_soon_threadsafe(attempt_state.on_disconnect, reason_code)
+                _safe_call_soon_threadsafe(loop, attempt_state.on_disconnect, reason_code)
 
             try:
                 try:
@@ -444,6 +451,8 @@ class SpiderVenomClient:
                     if state.subscribe_error is not None:
                         raise SpiderVenomApiError(state.subscribe_error[0], status=state.subscribe_error[1])
                     if state.disconnect_event.is_set():
+                        if state.disconnect_is_failure:
+                            self._credentials = None
                         msg, status = state.disconnect_error or ("MQTT disconnected during connect", None)
                         raise SpiderVenomApiError(msg, status=status)
 
@@ -476,6 +485,8 @@ class SpiderVenomClient:
                         break
 
                     if state.disconnect_event.is_set():
+                        if state.disconnect_is_failure:
+                            self._credentials = None
                         msg, status = state.disconnect_error or ("MQTT disconnected", None)
                         raise SpiderVenomApiError(msg, status=status)
 
@@ -627,7 +638,9 @@ class SpiderVenomClient:
                 reason_str = str(reason_code)
                 finish("error", (f"MQTT connect refused: {reason_str}", _auth_status(reason_str)))
                 return
-            mqtt_client.subscribe([(f"{topic}/accepted", 1), (f"{topic}/rejected", 1)])
+            rc, _mid = mqtt_client.subscribe([(f"{topic}/accepted", 1), (f"{topic}/rejected", 1)])
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                finish("error", (f"MQTT subscribe failed: {rc}", None))
 
         def on_subscribe(
             mqtt_client: mqtt.Client,
@@ -639,7 +652,9 @@ class SpiderVenomClient:
             if any(code.is_failure for code in reason_codes):
                 finish("error", (f"MQTT subscribe refused: {[str(c) for c in reason_codes]}", None))
                 return
-            mqtt_client.publish(topic, message, qos=1)
+            info = mqtt_client.publish(topic, message, qos=1)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                finish("error", (f"MQTT publish failed: {info.rc}", None))
 
         def on_message(
             mqtt_client: mqtt.Client,
@@ -954,6 +969,16 @@ def _auth_status(reason_str: str) -> int | None:
     if any(marker in lowered for marker in ("not authorized", "bad user name or password")):
         return 403
     return None
+
+
+def _safe_call_soon_threadsafe(
+    loop: asyncio.AbstractEventLoop,
+    fn: Callable[..., Any],
+    *args: Any,
+) -> None:
+    """Schedule a callback onto the event loop, ignoring closed-loop errors."""
+    with contextlib.suppress(RuntimeError):
+        loop.call_soon_threadsafe(fn, *args)
 
 
 async def _async_wait_any(events: tuple[asyncio.Event, ...], timeout: float | None) -> bool:
