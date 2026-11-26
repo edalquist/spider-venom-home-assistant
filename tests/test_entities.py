@@ -40,6 +40,12 @@ def _entity_id_by_key(hass: HomeAssistant, platform: str, key: str) -> str:
     return entity_id
 
 
+def _state(hass: HomeAssistant, entity_id: str) -> str:
+    state = hass.states.get(entity_id)
+    assert state is not None, f"Missing state for {entity_id}"
+    return state.state
+
+
 def test_number_descriptions_have_temperature_device_class() -> None:
     """All temperature number entities declare NumberDeviceClass.TEMPERATURE."""
     assert all(desc.device_class is NumberDeviceClass.TEMPERATURE for desc in NUMBERS)
@@ -59,20 +65,20 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         await hass.async_block_till_done()
 
     # Sensors
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "model")).state == "Venom"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "firmware_version")).state == "1.2.3"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "main_temp")).state == "225"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "heat_intensity")).state == "65"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "rssi")).state == "-58"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "errors")).state == "E01,E02"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "probe_1_temp")).state == "145"
-    assert hass.states.get(_entity_id_by_key(hass, "sensor", "probe_2_temp")).state == "180"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "model")) == "Venom"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "firmware_version")) == "1.2.3"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "main_temp")) == "225"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "heat_intensity")) == "65"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "rssi")) == "-58"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "errors")) == "E01,E02"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "probe_1_temp")) == "145"
+    assert _state(hass, _entity_id_by_key(hass, "sensor", "probe_2_temp")) == "180"
     assert (
-        hass.states.get(_entity_id_by_key(hass, "sensor", "shadow_last_updated")).state
+        _state(hass, _entity_id_by_key(hass, "sensor", "shadow_last_updated"))
         == "2023-11-14T22:15:23+00:00"
     )
     assert (
-        hass.states.get(_entity_id_by_key(hass, "sensor", "last_reported")).state
+        _state(hass, _entity_id_by_key(hass, "sensor", "last_reported"))
         == "2023-11-14T22:15:10+00:00"
     )
 
@@ -110,9 +116,9 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         assert "state_class" not in state.attributes
 
     # Binary sensors
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "door")).state == "off"
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "heating")).state == "on"
-    assert hass.states.get(_entity_id_by_key(hass, "binary_sensor", "low_temp_notification")).state == "on"
+    assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "door")) == "off"
+    assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "heating")) == "on"
+    assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "low_temp_notification")) == "on"
 
     # Duplicate read-only entities removed
     for platform, dup_key in (
@@ -127,11 +133,11 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         assert registry.async_get_entity_id(platform, DOMAIN, f"{MOCK_THING_NAME}_{dup_key}") is None
 
     # Numbers & switches
-    assert hass.states.get(_entity_id_by_key(hass, "number", "target_temperature_control")).state == "250"
-    assert hass.states.get(_entity_id_by_key(hass, "number", "probe_1_target_temperature_control")).state == "165"
-    assert hass.states.get(_entity_id_by_key(hass, "number", "probe_2_target_temperature_control")).state == "203"
-    assert hass.states.get(_entity_id_by_key(hass, "switch", "power_control")).state == "on"
-    assert hass.states.get(_entity_id_by_key(hass, "switch", "paused_control")).state == "off"
+    assert _state(hass, _entity_id_by_key(hass, "number", "target_temperature_control")) == "250"
+    assert _state(hass, _entity_id_by_key(hass, "number", "probe_1_target_temperature_control")) == "165"
+    assert _state(hass, _entity_id_by_key(hass, "number", "probe_2_target_temperature_control")) == "203"
+    assert _state(hass, _entity_id_by_key(hass, "switch", "power_control")) == "on"
+    assert _state(hass, _entity_id_by_key(hass, "switch", "paused_control")) == "off"
 
     # Device registry + MAC connection
     dev_reg = dr.async_get(hass)
@@ -191,7 +197,7 @@ async def test_number_and_switch_controls(hass: HomeAssistant) -> None:
             blocking=True,
         )
         mock_update.assert_any_call({"heat": {"t2": {"trgt": 325}}})
-        assert hass.states.get(target_entity).state == "325"
+        assert _state(hass, target_entity) == "325"
 
         probe1_entity = _entity_id_by_key(hass, "number", "probe_1_target_temperature_control")
         await hass.services.async_call(
@@ -201,17 +207,17 @@ async def test_number_and_switch_controls(hass: HomeAssistant) -> None:
             blocking=True,
         )
         mock_update.assert_any_call({"probes": {"p1": {"trgt": 195}}})
-        assert hass.states.get(probe1_entity).state == "195"
+        assert _state(hass, probe1_entity) == "195"
 
         power_entity = _entity_id_by_key(hass, "switch", "power_control")
         await hass.services.async_call("switch", "turn_off", {"entity_id": power_entity}, blocking=True)
         mock_update.assert_any_call({"pwrOn": False})
-        assert hass.states.get(power_entity).state == "off"
+        assert _state(hass, power_entity) == "off"
 
         paused_entity = _entity_id_by_key(hass, "switch", "paused_control")
         await hass.services.async_call("switch", "turn_on", {"entity_id": paused_entity}, blocking=True)
         mock_update.assert_any_call({"paused": True})
-        assert hass.states.get(paused_entity).state == "on"
+        assert _state(hass, paused_entity) == "on"
 
 
 async def test_optimistic_reconciliation_service_external_and_expiry(hass: HomeAssistant) -> None:
@@ -250,19 +256,19 @@ async def test_optimistic_reconciliation_service_external_and_expiry(hass: HomeA
             {ATTR_TEMPERATURE: 300},
             blocking=True,
         )
-        assert hass.states.get(target_entity).state == "300"
+        assert _state(hass, target_entity) == "300"
 
         shadow["state"]["reported"]["heat"]["t2"]["trgt"] = 275
         await entry.runtime_data.async_refresh()
         await hass.async_block_till_done()
-        assert hass.states.get(target_entity).state == "275"
+        assert _state(hass, target_entity) == "275"
 
         await hass.services.async_call("switch", "turn_off", {"entity_id": power_entity}, blocking=True)
-        assert hass.states.get(power_entity).state == "off"
+        assert _state(hass, power_entity) == "off"
 
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
         await hass.async_block_till_done()
-        assert hass.states.get(power_entity).state == "on"
+        assert _state(hass, power_entity) == "on"
 
         coordinator = entry.runtime_data
         await hass.services.async_call("switch", "turn_off", {"entity_id": power_entity}, blocking=True)
@@ -287,10 +293,10 @@ async def test_push_update_updates_entities_and_reconciles_optimistic(hass: Home
 
     main_temp_eid = _entity_id_by_key(hass, "sensor", "main_temp")
     target_eid = _entity_id_by_key(hass, "number", "target_temperature_control")
-    assert hass.states.get(main_temp_eid).state == "225"
+    assert _state(hass, main_temp_eid) == "225"
 
     entry.runtime_data.set_optimistic_value(("heat", "t2", "trgt"), 310)
-    assert hass.states.get(target_eid).state == "310"
+    assert _state(hass, target_eid) == "310"
 
     pushed = deepcopy(SAMPLE_SHADOW)
     pushed["state"]["reported"]["mainTemp"] = 242
@@ -298,8 +304,8 @@ async def test_push_update_updates_entities_and_reconciles_optimistic(hass: Home
     entry.runtime_data._handle_push_update(pushed)
     await hass.async_block_till_done()
 
-    assert hass.states.get(main_temp_eid).state == "242"
-    assert hass.states.get(target_eid).state == "310"
+    assert _state(hass, main_temp_eid) == "242"
+    assert _state(hass, target_eid) == "310"
     assert not entry.runtime_data._optimistic
 
 

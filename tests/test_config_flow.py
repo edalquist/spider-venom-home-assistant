@@ -100,6 +100,7 @@ async def test_account_step_errors_and_suggested_values(hass: HomeAssistant) -> 
     assert auth_err["type"] is FlowResultType.FORM
     assert auth_err["errors"] == {"base": "invalid_auth"}
 
+    assert auth_err["data_schema"] is not None
     schema_dict = auth_err["data_schema"].schema
     suggested = {
         key.schema: key.description.get("suggested_value")
