@@ -45,11 +45,11 @@ Apple sign-in is not supported yet. Manual Thing Name setup was removed because 
 
 ## Entities
 
-Sensors include current temperature, probe temperatures, heat intensity, heat start time, firmware, Wi-Fi details, signal strength, limits, flags, errors, and last reported/updated timestamps.
+Sensors include pit temperature, Probe 1 and Probe 2 temperatures, fan speed, cook start time, firmware, Wi-Fi details, signal strength, pit limits/alerts, flags, errors, and last reported/updated timestamps.
 
-Binary sensors include door, heating, Fahrenheit mode, and temperature notifications.
+Binary sensors include lid, heating, Fahrenheit mode, and high/low temp alerts.
 
-Controls include main target temperature, Probe 1 and Probe 2 target temperatures, power, engaged, paused, and high temperature mode.
+Controls include pit target temperature, Probe 1 and Probe 2 target temperatures, power, temperature control, pause, and high temp mode.
 
 ## Service
 

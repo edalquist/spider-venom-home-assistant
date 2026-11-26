@@ -383,3 +383,11 @@ def test_entity_translation_keys_present_in_translations() -> None:
             assert desc.key in strings["entity"][platform]
             assert desc.key in en["entity"][platform]
             assert strings["entity"][platform][desc.key]["name"] == en["entity"][platform][desc.key]["name"]
+
+    assert en["entity"]["sensor"]["main_temp"]["name"] == "Pit temperature"
+    assert en["entity"]["sensor"]["heat_intensity"]["name"] == "Fan speed"
+    assert en["entity"]["binary_sensor"]["door"]["name"] == "Lid"
+    assert en["entity"]["number"]["target_temperature_control"]["name"] == "Pit target temperature"
+    assert en["entity"]["switch"]["power_control"]["name"] == "Power"
+    assert en["entity"]["switch"]["paused_control"]["name"] == "Pause"
+    assert en["entity"]["switch"]["engaged_control"]["name"] == "Temperature control"

@@ -29,7 +29,7 @@ BINARY_SENSORS: tuple[SpiderVenomBinarySensorDescription, ...] = (
     SpiderVenomBinarySensorDescription(
         key="door",
         translation_key="door",
-        device_class=BinarySensorDeviceClass.DOOR,
+        device_class=BinarySensorDeviceClass.OPENING,
         value_fn=path_value_fn(("doorOpn",)),
     ),
     SpiderVenomBinarySensorDescription(

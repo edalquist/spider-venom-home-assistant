@@ -43,13 +43,13 @@
       "model": { "name": "Model" },
       "firmware_version": { "name": "Firmware version" },
       "mac_address": { "name": "MAC address" },
-      "main_temp": { "name": "Current temperature" },
-      "target_min": { "name": "Minimum target temperature" },
-      "target_max": { "name": "Maximum target temperature" },
-      "heat_intensity": { "name": "Heat intensity" },
-      "heat_start_time": { "name": "Heat start time" },
-      "high_temp_limit": { "name": "High temperature notification limit" },
-      "low_temp_limit": { "name": "Low temperature notification limit" },
+      "main_temp": { "name": "Pit temperature" },
+      "target_min": { "name": "Minimum pit target" },
+      "target_max": { "name": "Maximum pit target" },
+      "heat_intensity": { "name": "Fan speed" },
+      "heat_start_time": { "name": "Cook start time" },
+      "high_temp_limit": { "name": "High pit temp alert" },
+      "low_temp_limit": { "name": "Low pit temp alert" },
       "rssi": { "name": "Signal strength" },
       "ssid": { "name": "Wi-Fi SSID" },
       "bssid": { "name": "Wi-Fi BSSID" },
@@ -62,22 +62,22 @@
       "probe_2_temp": { "name": "Probe 2 temperature" }
     },
     "binary_sensor": {
-      "door": { "name": "Door" },
+      "door": { "name": "Lid" },
       "heating": { "name": "Heating" },
       "fahrenheit_mode": { "name": "Fahrenheit mode" },
-      "high_temp_notification": { "name": "High temperature notification" },
-      "low_temp_notification": { "name": "Low temperature notification" }
+      "high_temp_notification": { "name": "High temp alert" },
+      "low_temp_notification": { "name": "Low temp alert" }
     },
     "number": {
-      "target_temperature_control": { "name": "Target temperature control" },
-      "probe_1_target_temperature_control": { "name": "Probe 1 target temperature control" },
-      "probe_2_target_temperature_control": { "name": "Probe 2 target temperature control" }
+      "target_temperature_control": { "name": "Pit target temperature" },
+      "probe_1_target_temperature_control": { "name": "Probe 1 target temperature" },
+      "probe_2_target_temperature_control": { "name": "Probe 2 target temperature" }
     },
     "switch": {
-      "power_control": { "name": "Power control" },
-      "engaged_control": { "name": "Engaged control" },
-      "paused_control": { "name": "Paused control" },
-      "high_temp_mode_control": { "name": "High temperature mode control" }
+      "power_control": { "name": "Power" },
+      "engaged_control": { "name": "Temperature control" },
+      "paused_control": { "name": "Pause" },
+      "high_temp_mode_control": { "name": "High temp mode" }
     }
   }
 }
