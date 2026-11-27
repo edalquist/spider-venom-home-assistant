@@ -28,9 +28,11 @@ from .api import (
     SpiderVenomClient,
 )
 from .const import (
+    CONF_OFFLINE_TIMEOUT,
     CONF_THING_NAME,
     DEFAULT_ENDPOINT,
     DEFAULT_IDENTITY_POOL_ID,
+    DEFAULT_OFFLINE_TIMEOUT,
     DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -41,6 +43,16 @@ _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL_SELECTOR = NumberSelector(
     NumberSelectorConfig(
         min=10,
+        max=3600,
+        step=1,
+        unit_of_measurement="seconds",
+        mode=NumberSelectorMode.BOX,
+    )
+)
+
+OFFLINE_TIMEOUT_SELECTOR = NumberSelector(
+    NumberSelectorConfig(
+        min=0,
         max=3600,
         step=1,
         unit_of_measurement="seconds",
@@ -247,7 +259,10 @@ class SpiderVenomOptionsFlow(config_entries.OptionsFlow):
         """Manage integration options."""
         if user_input is not None:
             return self.async_create_entry(
-                data={CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])}
+                data={
+                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    CONF_OFFLINE_TIMEOUT: int(user_input[CONF_OFFLINE_TIMEOUT]),
+                }
             )
 
         current_interval = self.config_entry.options.get(
@@ -255,6 +270,13 @@ class SpiderVenomOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_SCAN_INTERVAL,
                 int(DEFAULT_SCAN_INTERVAL.total_seconds()),
+            ),
+        )
+        current_offline_timeout = self.config_entry.options.get(
+            CONF_OFFLINE_TIMEOUT,
+            self.config_entry.data.get(
+                CONF_OFFLINE_TIMEOUT,
+                DEFAULT_OFFLINE_TIMEOUT,
             ),
         )
         return self.async_show_form(
@@ -265,6 +287,10 @@ class SpiderVenomOptionsFlow(config_entries.OptionsFlow):
                         CONF_SCAN_INTERVAL,
                         default=current_interval,
                     ): SCAN_INTERVAL_SELECTOR,
+                    vol.Optional(
+                        CONF_OFFLINE_TIMEOUT,
+                        default=current_offline_timeout,
+                    ): OFFLINE_TIMEOUT_SELECTOR,
                 }
             ),
         )

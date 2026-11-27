@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any
 
@@ -15,7 +15,12 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .api import SpiderVenomApiError, SpiderVenomClient
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    CONF_OFFLINE_TIMEOUT,
+    DEFAULT_OFFLINE_TIMEOUT,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_OPTIMISTIC_TTL = timedelta(seconds=60)
@@ -54,6 +59,41 @@ def value_at_path(data: dict[str, Any], path: tuple[str, ...]) -> Any:
     return value
 
 
+def latest_reported_timestamp(shadow: dict[str, Any] | None) -> datetime | None:
+    """Return the newest timestamp from shadow metadata.reported."""
+    metadata = shadow.get("metadata") if isinstance(shadow, dict) else None
+    reported_meta = metadata.get("reported") if isinstance(metadata, dict) else None
+    if not isinstance(reported_meta, dict):
+        return None
+
+    latest: float | None = None
+    stack: list[Any] = [reported_meta]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict | list):
+                    stack.append(item)
+            continue
+        if not isinstance(node, dict):
+            continue
+        ts = node.get("timestamp")
+        if not isinstance(ts, bool) and isinstance(ts, int | float) and ts > 0 and (
+            latest is None or ts > latest
+        ):
+            latest = float(ts)
+        for key, child in node.items():
+            if key != "timestamp" and isinstance(child, dict | list):
+                stack.append(child)
+
+    if latest is None:
+        return None
+    try:
+        return datetime.fromtimestamp(latest, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinate Spider Grills Venom shadow polling."""
 
@@ -75,6 +115,10 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and interval_seconds >= 10
             else DEFAULT_SCAN_INTERVAL
         )
+        offline_timeout = entry.options.get(
+            CONF_OFFLINE_TIMEOUT,
+            entry.data.get(CONF_OFFLINE_TIMEOUT, DEFAULT_OFFLINE_TIMEOUT),
+        )
         super().__init__(
             hass,
             _LOGGER,
@@ -85,6 +129,18 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.client = client
         self._optimistic: dict[tuple[str, ...], _OptimisticEntry] = {}
         self._last_shadow_version: int | None = None
+        self._offline_timeout: int = (
+            offline_timeout
+            if isinstance(offline_timeout, int)
+            and not isinstance(offline_timeout, bool)
+            and offline_timeout >= 0
+            else DEFAULT_OFFLINE_TIMEOUT
+        )
+        self._shadow_received_at: datetime | None = None
+        self._last_reported_at: datetime | None = None
+        self._age_at_receipt: float | None = None
+        self._timed_out = False
+        self._offline_unsub: CALLBACK_TYPE | None = None
 
     def _is_stale_version(self, data: dict[str, Any]) -> bool:
         """Return True if data carries a strictly older shadow version than already seen."""
@@ -94,6 +150,63 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return True
             self._last_shadow_version = version
         return False
+
+    def _update_liveness(self, data: dict[str, Any]) -> None:
+        """Record latest device report timestamp and schedule offline timeout."""
+        last_reported = latest_reported_timestamp(data)
+        self._last_reported_at = last_reported
+        now = dt_util.utcnow()
+        self._shadow_received_at = now
+        if self._offline_unsub is not None:
+            self._offline_unsub()
+            self._offline_unsub = None
+
+        if last_reported is None:
+            self._age_at_receipt = None
+            self._timed_out = False
+            return
+
+        reference_dt = now
+        shadow_ts = data.get("timestamp")
+        if not isinstance(shadow_ts, bool) and isinstance(shadow_ts, int | float) and shadow_ts > 0:
+            try:
+                reference_dt = datetime.fromtimestamp(shadow_ts, UTC)
+            except (OverflowError, OSError, ValueError):
+                reference_dt = now
+
+        age_at_receipt = max(0.0, (reference_dt - last_reported).total_seconds())
+        self._age_at_receipt = age_at_receipt
+        self._timed_out = self._offline_timeout > 0 and age_at_receipt >= self._offline_timeout
+
+        if self._offline_timeout > 0 and not self._timed_out:
+            @callback
+            def _on_offline_timeout(_now: datetime) -> None:
+                self._offline_unsub = None
+                self._timed_out = True
+                self.async_update_listeners()
+
+            self._offline_unsub = async_call_later(
+                self.hass,
+                self._offline_timeout - age_at_receipt,
+                _on_offline_timeout,
+            )
+
+    @property
+    def last_reported_at(self) -> datetime | None:
+        """Return the latest device report timestamp from shadow metadata."""
+        return self._last_reported_at
+
+    @property
+    def is_device_online(self) -> bool:
+        """Return True if the controller has reported within offline_timeout."""
+        if self._offline_timeout <= 0:
+            return True
+        if self._timed_out:
+            return False
+        if self._age_at_receipt is None or self._shadow_received_at is None:
+            return True
+        elapsed = max(0.0, (dt_util.utcnow() - self._shadow_received_at).total_seconds())
+        return (self._age_at_receipt + elapsed) < self._offline_timeout
 
     async def async_start_push(self) -> None:
         """Start the persistent MQTT push connection."""
@@ -113,6 +226,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Apply a pushed shadow update from MQTT."""
         if self._is_stale_version(data):
             return
+        self._update_liveness(data)
         self._reconcile_optimistic(data)
         self.async_set_updated_data(data)
 
@@ -125,6 +239,7 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self._is_stale_version(data) and self.data is not None:
             return self.data
+        self._update_liveness(data)
         self._reconcile_optimistic(data)
         return data
 
@@ -164,6 +279,14 @@ class SpiderVenomDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if entry is None or dt_util.utcnow() >= entry.expires_at:
             return False, None
         return True, entry.value
+
+    @callback
+    def async_clear_timers(self) -> None:
+        """Cancel all coordinator timers (offline timeout and optimistic)."""
+        if self._offline_unsub is not None:
+            self._offline_unsub()
+            self._offline_unsub = None
+        self.async_clear_optimistic_timers()
 
     @callback
     def async_clear_optimistic_timers(self) -> None:

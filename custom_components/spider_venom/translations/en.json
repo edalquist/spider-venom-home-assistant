@@ -36,10 +36,12 @@
       "init": {
         "title": "Spider Grills Venom options",
         "data": {
-          "scan_interval": "Scan interval"
+          "scan_interval": "Scan interval",
+          "offline_timeout": "Offline timeout"
         },
         "data_description": {
-          "scan_interval": "Fallback polling interval in seconds. Live updates are delivered via MQTT push."
+          "scan_interval": "Fallback polling interval in seconds. Live updates are delivered via MQTT push.",
+          "offline_timeout": "Seconds without a device report before marking the controller offline (0 to disable)."
         }
       }
     }
@@ -68,6 +70,7 @@
       "probe_2_temp": { "name": "Probe 2 temperature" }
     },
     "binary_sensor": {
+      "connected": { "name": "Connectivity" },
       "door": { "name": "Lid" },
       "heating": { "name": "Heating" },
       "fahrenheit_mode": { "name": "Fahrenheit mode" },

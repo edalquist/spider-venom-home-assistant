@@ -489,3 +489,37 @@ async def test_config_entry_diagnostics_redacts_sensitive_fields(hass: HomeAssis
     assert reported["bssid"] == "**REDACTED**"
     assert reported["mainTemp"] == 225
     assert diag["last_update_success"] is True
+    assert diag["is_device_online"] is True
+    assert diag["last_reported_at"] == "2023-11-14T22:15:10+00:00"
+
+
+async def test_set_target_temperature_service_rejects_offline_device(hass: HomeAssistant) -> None:
+    """Verify set_target_temperature raises HomeAssistantError when Venom is offline."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_ENTRY_DATA, unique_id=MOCK_THING_NAME)
+    entry.add_to_hass(hass)
+
+    stale_shadow = make_shadow()
+    stale_shadow["timestamp"] = 1700000410
+
+    with (
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+            return_value=stale_shadow,
+        ),
+        patch(
+            "custom_components.spider_venom.api.SpiderVenomClient.async_set_target_temperature",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as mock_set_temp,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        with pytest.raises(HomeAssistantError, match="offline"):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_SET_TARGET_TEMPERATURE,
+                {ATTR_TEMPERATURE: 300},
+                blocking=True,
+            )
+        mock_set_temp.assert_not_called()

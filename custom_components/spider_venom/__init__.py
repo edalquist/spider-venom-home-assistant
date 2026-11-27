@@ -100,6 +100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry) 
         await coordinator.async_stop_push()
 
     entry.runtime_data = coordinator
+    entry.async_on_unload(coordinator.async_clear_timers)
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop_on_shutdown))
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     try:
@@ -116,7 +117,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpiderVenomConfigEntry)
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         await entry.runtime_data.async_stop_push()
-        entry.runtime_data.async_clear_optimistic_timers()
+        entry.runtime_data.async_clear_timers()
     return unloaded
 
 
@@ -170,6 +171,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         for target_entry in target_entries:
             coordinator: SpiderVenomDataUpdateCoordinator = target_entry.runtime_data
+            if not coordinator.is_device_online:
+                raise HomeAssistantError("Spider Grills Venom is offline")
             try:
                 await coordinator.client.async_set_target_temperature(temperature)
             except SpiderVenomApiError as err:

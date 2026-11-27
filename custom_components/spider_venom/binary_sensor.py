@@ -23,10 +23,20 @@ from .entity import SpiderVenomEntity, path_value_fn
 class SpiderVenomBinarySensorDescription(BinarySensorEntityDescription):
     """Description of a Spider Grills Venom binary sensor."""
 
-    value_fn: Callable[[dict[str, Any]], Any]
+    value_fn: Callable[[dict[str, Any]], Any] | None = None
+    available_when_offline: bool = False
+    use_online_status: bool = False
 
 
 BINARY_SENSORS: tuple[SpiderVenomBinarySensorDescription, ...] = (
+    SpiderVenomBinarySensorDescription(
+        key="connected",
+        translation_key="connected",
+        device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        available_when_offline=True,
+        use_online_status=True,
+    ),
     SpiderVenomBinarySensorDescription(
         key="door",
         translation_key="door",
@@ -87,9 +97,13 @@ class SpiderVenomBinarySensor(SpiderVenomEntity, BinarySensorEntity):
         """Initialize the binary sensor."""
         super().__init__(coordinator, entry, description.key)
         self.entity_description = description
+        self._available_when_offline = description.available_when_offline
 
     @property
     def is_on(self) -> bool | None:
         """Return the binary sensor state."""
+        if self.entity_description.use_online_status:
+            return self.coordinator.is_device_online
+        assert self.entity_description.value_fn is not None
         value = self.entity_description.value_fn(self.coordinator.reported)
         return bool(value) if value is not None else None

@@ -31,4 +31,8 @@ async def async_get_config_entry_diagnostics(
         "entry_options": async_redact_data(dict(entry.options), TO_REDACT),
         "coordinator_data": async_redact_data(coordinator.data or {}, TO_REDACT),
         "last_update_success": coordinator.last_update_success,
+        "is_device_online": coordinator.is_device_online,
+        "last_reported_at": (
+            coordinator.last_reported_at.isoformat() if coordinator.last_reported_at else None
+        ),
     }

@@ -15,6 +15,7 @@ from custom_components.spider_venom.api import SpiderVenomApiError
 from custom_components.spider_venom.binary_sensor import BINARY_SENSORS
 from custom_components.spider_venom.const import (
     ATTR_TEMPERATURE,
+    CONF_OFFLINE_TIMEOUT,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     SERVICE_SET_TARGET_TEMPERATURE,
@@ -117,14 +118,16 @@ async def test_entities_initial_states_diagnostics_and_device_registry(hass: Hom
         assert "state_class" not in state.attributes
 
     # Binary sensors
+    assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "connected")) == "on"
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "door")) == "off"
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "heating")) == "on"
     assert _state(hass, _entity_id_by_key(hass, "binary_sensor", "low_temp_notification")) == "on"
 
     # Diagnostic binary sensors
-    fahrenheit_reg = registry.async_get(_entity_id_by_key(hass, "binary_sensor", "fahrenheit_mode"))
-    assert fahrenheit_reg is not None
-    assert fahrenheit_reg.entity_category is EntityCategory.DIAGNOSTIC
+    for diag_bin_key in ("connected", "fahrenheit_mode"):
+        bin_reg = registry.async_get(_entity_id_by_key(hass, "binary_sensor", diag_bin_key))
+        assert bin_reg is not None
+        assert bin_reg.entity_category is EntityCategory.DIAGNOSTIC
 
     # Duplicate read-only entities removed
     for platform, dup_key in (
@@ -623,3 +626,75 @@ async def test_coordinator_ignores_stale_shadow_versions(hass: HomeAssistant) ->
         await entry.runtime_data.async_refresh()
         await hass.async_block_till_done()
         assert _state(hass, main_temp_eid) == "240"
+
+
+async def test_offline_detection_connectivity_availability_and_recovery(hass: HomeAssistant) -> None:
+    """Verify stale device reports mark controller offline while keeping diagnostics available."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**MOCK_ENTRY_DATA, CONF_SCAN_INTERVAL: 300},
+        unique_id=MOCK_THING_NAME,
+    )
+    entry.add_to_hass(hass)
+
+    # Initial poll shows shadow updated 300s after last device report -> offline
+    stale_shadow = deepcopy(SAMPLE_SHADOW)
+    stale_shadow["timestamp"] = 1700000410
+
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=stale_shadow,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    connected_eid = _entity_id_by_key(hass, "binary_sensor", "connected")
+    last_reported_eid = _entity_id_by_key(hass, "sensor", "last_reported")
+    shadow_updated_eid = _entity_id_by_key(hass, "sensor", "shadow_last_updated")
+    power_eid = _entity_id_by_key(hass, "switch", "power_control")
+    main_temp_eid = _entity_id_by_key(hass, "sensor", "main_temp")
+    target_eid = _entity_id_by_key(hass, "number", "target_temperature_control")
+    heating_eid = _entity_id_by_key(hass, "binary_sensor", "heating")
+
+    assert _state(hass, connected_eid) == "off"
+    assert _state(hass, last_reported_eid) != "unavailable"
+    assert _state(hass, shadow_updated_eid) != "unavailable"
+    for eid in (power_eid, main_temp_eid, target_eid, heating_eid):
+        assert _state(hass, eid) == "unavailable"
+
+    # A fresh push from the device brings entities back online immediately
+    fresh_push = deepcopy(SAMPLE_SHADOW)
+    fresh_push["timestamp"] = 1700000500
+    fresh_push["metadata"]["reported"]["mainTemp"]["timestamp"] = 1700000498
+    entry.runtime_data._handle_push_update(fresh_push)
+    await hass.async_block_till_done()
+
+    assert _state(hass, connected_eid) == "on"
+    assert _state(hass, power_eid) == "on"
+    assert _state(hass, main_temp_eid) == "225"
+
+    # Advancing past 120s without new reports flips Connectivity off and entities unavailable
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=125))
+    await hass.async_block_till_done()
+
+    assert _state(hass, connected_eid) == "off"
+    assert _state(hass, power_eid) == "unavailable"
+    assert _state(hass, main_temp_eid) == "unavailable"
+
+    # Setting offline_timeout=0 disables offline gating
+    entry_disabled = MockConfigEntry(
+        domain=DOMAIN,
+        data=MOCK_ENTRY_DATA,
+        options={CONF_OFFLINE_TIMEOUT: 0},
+        unique_id="venom-offline-disabled",
+    )
+    entry_disabled.add_to_hass(hass)
+    with patch(
+        "custom_components.spider_venom.api.SpiderVenomClient.async_get_shadow",
+        return_value=stale_shadow,
+    ):
+        assert await hass.config_entries.async_setup(entry_disabled.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry_disabled.runtime_data.is_device_online is True

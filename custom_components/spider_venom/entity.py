@@ -17,6 +17,7 @@ class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
     """Base Spider Grills Venom entity."""
 
     _attr_has_entity_name = True
+    _available_when_offline: bool = False
 
     def __init__(
         self,
@@ -29,6 +30,15 @@ class SpiderVenomEntity(CoordinatorEntity[SpiderVenomDataUpdateCoordinator]):
         self._thing_name = entry.data[CONF_THING_NAME]
         self._device_name = entry.title or "Venom"
         self._attr_unique_id = f"{self._thing_name}_{key}"
+
+    @property
+    def available(self) -> bool:
+        """Return True if the coordinator is available and device is online when required."""
+        if not super().available:
+            return False
+        if self._available_when_offline:
+            return True
+        return self.coordinator.is_device_online
 
     @property
     def device_info(self) -> DeviceInfo:

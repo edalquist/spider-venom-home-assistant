@@ -23,6 +23,10 @@
       "probe_2_temp": { "default": "mdi:thermometer-probe" }
     },
     "binary_sensor": {
+      "connected": {
+        "default": "mdi:wifi-check",
+        "state": { "off": "mdi:wifi-off" }
+      },
       "door": { "default": "mdi:door" },
       "heating": { "default": "mdi:fire" },
       "fahrenheit_mode": { "default": "mdi:temperature-fahrenheit" },

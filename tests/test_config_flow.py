@@ -12,6 +12,7 @@ from custom_components.spider_venom.config_flow import _device_label, _device_th
 from custom_components.spider_venom.const import (
     CONF_ENDPOINT,
     CONF_IDENTITY_POOL_ID,
+    CONF_OFFLINE_TIMEOUT,
     CONF_REGION,
     CONF_THING_NAME,
     DEFAULT_ENDPOINT,
@@ -262,13 +263,15 @@ async def test_options_flow_updates_scan_interval_and_reloads(hass: HomeAssistan
 
         saved = await hass.config_entries.options.async_configure(
             opt_result["flow_id"],
-            {CONF_SCAN_INTERVAL: 90},
+            {CONF_SCAN_INTERVAL: 90, CONF_OFFLINE_TIMEOUT: 180},
         )
         assert saved["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
 
         assert entry.options[CONF_SCAN_INTERVAL] == 90
+        assert entry.options[CONF_OFFLINE_TIMEOUT] == 180
         assert entry.runtime_data.update_interval == timedelta(seconds=90)
+        assert entry.runtime_data._offline_timeout == 180
 
 
 def test_device_helpers() -> None:

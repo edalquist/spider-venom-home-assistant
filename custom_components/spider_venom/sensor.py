@@ -18,7 +18,11 @@ from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT as DBM
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .coordinator import SpiderVenomConfigEntry, SpiderVenomDataUpdateCoordinator
+from .coordinator import (
+    SpiderVenomConfigEntry,
+    SpiderVenomDataUpdateCoordinator,
+    latest_reported_timestamp,
+)
 from .entity import SpiderVenomEntity, path_value_fn, value_at_path
 
 
@@ -28,6 +32,7 @@ class SpiderVenomSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[dict[str, Any]], Any]
     use_root: bool = False
+    available_when_offline: bool = False
 
 
 def _numeric_path_value_fn(path: tuple[str, ...]) -> Callable[[dict[str, Any]], int | float | None]:
@@ -62,39 +67,7 @@ def _errors(reported: dict[str, Any]) -> str | None:
     return ",".join(str(error) for error in errors)[:255]
 
 
-def _latest_reported_timestamp(shadow: dict[str, Any]) -> datetime | None:
-    """Return the newest timestamp from shadow metadata.reported."""
-    metadata = shadow.get("metadata")
-    reported_meta = metadata.get("reported") if isinstance(metadata, dict) else None
-    if not isinstance(reported_meta, dict):
-        return None
-
-    latest: float | None = None
-    stack: list[Any] = [reported_meta]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, list):
-            for item in node:
-                if isinstance(item, dict | list):
-                    stack.append(item)
-            continue
-        if not isinstance(node, dict):
-            continue
-        ts = node.get("timestamp")
-        if not isinstance(ts, bool) and isinstance(ts, int | float) and ts > 0 and (
-            latest is None or ts > latest
-        ):
-            latest = float(ts)
-        for key, child in node.items():
-            if key != "timestamp" and isinstance(child, dict | list):
-                stack.append(child)
-
-    if latest is None:
-        return None
-    try:
-        return datetime.fromtimestamp(latest, UTC)
-    except (OverflowError, OSError, ValueError):
-        return None
+_latest_reported_timestamp = latest_reported_timestamp
 
 
 SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
@@ -214,6 +187,7 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
         use_root=True,
+        available_when_offline=True,
         value_fn=_timestamp(("timestamp",)),
     ),
     SpiderVenomSensorDescription(
@@ -222,7 +196,8 @@ SENSORS: tuple[SpiderVenomSensorDescription, ...] = (
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
         use_root=True,
-        value_fn=_latest_reported_timestamp,
+        available_when_offline=True,
+        value_fn=latest_reported_timestamp,
     ),
     SpiderVenomSensorDescription(
         key="probe_1_temp",
@@ -267,6 +242,7 @@ class SpiderVenomSensor(SpiderVenomEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator, entry, description.key)
         self.entity_description = description
+        self._available_when_offline = description.available_when_offline
 
     @property
     def native_value(self) -> Any:
