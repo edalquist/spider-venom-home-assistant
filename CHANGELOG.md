@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.2 - 2026-11-26
+
+### Added
+
+- Detect offline controllers via stale AWS IoT Shadow `metadata.reported` timestamps, with a configurable `offline_timeout` option (`0–3600` seconds, default `120` seconds, `0` to disable) in the integration options flow.
+- New diagnostic `Connectivity` binary sensor (`binary_sensor.*_connected`) with `mdi:wifi-check` / `mdi:wifi-off` icons.
+- Added `is_device_online` and `last_reported_at` fields to integration diagnostics.
+
+### Changed
+
+- Mark live sensors and controls `unavailable` when the controller is offline while keeping `Connectivity`, `Last reported`, and `Shadow last updated` available.
+- Reject `spider_venom.set_target_temperature` service calls with a `HomeAssistantError` when the controller is offline.
+
 ## v0.3.1 - 2026-11-26
 
 ### Fixed
